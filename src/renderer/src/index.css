@@ -1,0 +1,83 @@
+@import "tailwindcss";
+
+@custom-variant dark (&:where(.dark, .dark *));
+
+@theme {
+  --font-sans: "SF Pro Display", "SF Pro Text", ui-sans-serif, system-ui, -apple-system, sans-serif;
+  --color-ink: #0b0f14;
+  --color-ink-soft: #121821;
+  --color-panel: #171e28;
+  --color-line: #2a3444;
+  --color-accent: #3ddc97;
+  --color-accent-2: #4c8dff;
+  --ease-fluid: cubic-bezier(0.3, 0, 0, 1);
+}
+
+html,
+body,
+#root {
+  height: 100%;
+}
+
+body {
+  margin: 0;
+  font-family: var(--font-sans);
+  background: #f4f6f8;
+  color: #102033;
+}
+
+html.dark body {
+  background: var(--color-ink);
+  color: #eef4fb;
+}
+
+.titlebar {
+  -webkit-app-region: drag;
+}
+
+.titlebar button,
+.titlebar input,
+.no-drag {
+  -webkit-app-region: no-drag;
+}
+
+@keyframes spin-slow {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+@keyframes pulse-glow {
+  0%,
+  100% {
+    opacity: 0.45;
+    transform: scale(1);
+  }
+  50% {
+    opacity: 0.9;
+    transform: scale(1.06);
+  }
+}
+
+@keyframes rise-in {
+  from {
+    opacity: 0;
+    transform: translateY(12px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+.spin-slow {
+  animation: spin-slow 8s linear infinite;
+}
+
+.pulse-glow {
+  animation: pulse-glow 2.4s var(--ease-fluid) infinite;
+}
+
+.rise-in {
+  animation: rise-in 420ms var(--ease-fluid) both;
+}
