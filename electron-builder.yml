@@ -1,0 +1,15 @@
+appId: app.cleanmaster.desktop
+productName: Clean Master
+directories:
+  output: dist
+files:
+  - out/**
+mac:
+  category: public.app-category.utilities
+  target:
+    - dmg
+  sign: null
+  extendInfo:
+    NSAppleEventsUsageDescription: O Clean Master usa o Finder para esvaziar a Lixeira.
+dmg:
+  artifactName: ${productName}-${version}.${ext}
