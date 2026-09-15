@@ -2,13 +2,14 @@ import { chmod, mkdir, mkdtemp, readFile, symlink, writeFile } from 'node:fs/pro
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import { describe, expect, it } from 'vitest'
-import { isDeveloperArtifactName } from '../shared/categories'
+import { isDeveloperArtifactName, isDiskImageName } from '../shared/categories'
 import {
   assertInsideAllowedRoot,
   cleanCategories,
   emptyDirectory,
   isFsPermissionError,
   parseCategoryIds,
+  parseCleanRequest,
   resolveCategoryDir,
   scanCategories
 } from './cleanup'
@@ -30,6 +31,7 @@ async function makeFakeHome(): Promise<string> {
   await writeFile(path.join(home, 'Downloads', 'store.aab'), 'b'.repeat(50))
   await writeFile(path.join(home, 'Downloads', 'notes.txt'), 'n'.repeat(999))
   await writeFile(path.join(home, 'Downloads', 'builds', 'nested.ipa'), 'p'.repeat(80))
+  await writeFile(path.join(home, 'Downloads', 'installer.dmg'), 'm'.repeat(64))
   return home
 }
 
@@ -41,6 +43,13 @@ describe('isDeveloperArtifactName', () => {
     expect(isDeveloperArtifactName('notes.txt')).toBe(false)
     expect(isDeveloperArtifactName('.ipa')).toBe(false)
     expect(isDeveloperArtifactName('app.ipa.bak')).toBe(false)
+  })
+
+  it('aceita só .dmg', () => {
+    expect(isDiskImageName('installer.dmg')).toBe(true)
+    expect(isDiskImageName('app.DMG')).toBe(true)
+    expect(isDiskImageName('.dmg')).toBe(false)
+    expect(isDiskImageName('notes.txt')).toBe(false)
   })
 })
 
@@ -58,13 +67,25 @@ describe('parseCategoryIds', () => {
   })
 })
 
+describe('parseCleanRequest', () => {
+  it('rejeita caminho de DMG fora de Downloads', () => {
+    expect(() =>
+      parseCleanRequest({
+        categoryIds: ['downloads'],
+        downloadKinds: ['dmg'],
+        diskImages: ['../Secrets/app.dmg']
+      })
+    ).toThrow('Seleção inválida')
+  })
+})
+
 describe('resolveCategoryDir', () => {
   it('resolve pastas do Xcode e da Lixeira dentro do home', () => {
     expect(resolveCategoryDir('/Users/demo', 'derivedData')).toBe(
       path.resolve('/Users/demo/Library/Developer/Xcode/DerivedData')
     )
     expect(resolveCategoryDir('/Users/demo', 'trash')).toBe(path.resolve('/Users/demo/.Trash'))
-    expect(resolveCategoryDir('/Users/demo', 'developerArtifacts')).toBe(
+    expect(resolveCategoryDir('/Users/demo', 'downloads')).toBe(
       path.resolve('/Users/demo/Downloads')
     )
   })
@@ -92,26 +113,64 @@ describe('scan e clean', () => {
     const home = await makeFakeHome()
     const result = await scanCategories(home)
 
-    expect(result.totalBytes).toBe(2048 + 1024 + 512 + 256 + 430)
+    expect(result.totalBytes).toBe(2048 + 1024 + 512 + 256 + 494)
     expect(result.categories.map((item) => item.id)).toEqual([
       'derivedData',
       'archives',
       'iosDeviceSupport',
       'trash',
-      'developerArtifacts'
+      'downloads'
     ])
-    expect(result.categories.find((item) => item.id === 'developerArtifacts')?.bytes).toBe(430)
+    expect(result.categories.find((item) => item.id === 'downloads')?.bytes).toBe(494)
+    expect(result.categories.find((item) => item.id === 'downloads')?.artifactBytes).toBe(430)
+    expect(result.categories.find((item) => item.id === 'downloads')?.kindBytes).toEqual({
+      ipa: 180,
+      apk: 200,
+      aab: 50,
+      dmg: 64
+    })
+    expect(result.categories.find((item) => item.id === 'trash')?.bytes).toBe(256)
+    expect(result.categories.find((item) => item.id === 'trash')?.unknownSize).toBe(false)
   })
 
   it('remove só .ipa, .apk e .aab e deixa o resto de Downloads', async () => {
     const home = await makeFakeHome()
-    const cleaned = await cleanCategories(home, ['developerArtifacts'])
+    const cleaned = await cleanCategories(home, ['downloads'])
     const after = await scanCategories(home)
 
     expect(cleaned.totalFreedBytes).toBe(430)
-    expect(after.categories.find((item) => item.id === 'developerArtifacts')?.bytes).toBe(0)
+    expect(after.categories.find((item) => item.id === 'downloads')?.artifactBytes).toBe(0)
+    expect(after.categories.find((item) => item.id === 'downloads')?.bytes).toBe(64)
+    expect(await readFile(path.join(home, 'Downloads', 'installer.dmg'), 'utf8')).toBe('m'.repeat(64))
     expect(await readFile(path.join(home, 'Downloads', 'notes.txt'), 'utf8')).toBe('n'.repeat(999))
     expect(after.categories.find((item) => item.id === 'derivedData')?.bytes).toBe(2048)
+  })
+
+  it('apaga só os DMGs marcados em Downloads', async () => {
+    const home = await makeFakeHome()
+    await writeFile(path.join(home, 'Downloads', 'keep.dmg'), 'k'.repeat(32))
+    const cleaned = await cleanCategories(home, ['downloads'], {
+      downloadKinds: ['dmg'],
+      diskImages: ['installer.dmg']
+    })
+    const after = await scanCategories(home)
+
+    expect(cleaned.totalFreedBytes).toBe(64)
+    expect(after.categories.find((item) => item.id === 'downloads')?.artifactBytes).toBe(430)
+    expect(await readFile(path.join(home, 'Downloads', 'keep.dmg'), 'utf8')).toBe('k'.repeat(32))
+    expect(await readFile(path.join(home, 'Downloads', 'app.ipa'), 'utf8')).toBe('i'.repeat(100))
+  })
+
+  it('apaga só a extensão marcada em Downloads', async () => {
+    const home = await makeFakeHome()
+    await cleanCategories(home, ['downloads'], { downloadKinds: ['ipa'] })
+    const after = await scanCategories(home)
+    const downloads = after.categories.find((item) => item.id === 'downloads')
+
+    expect(downloads?.kindBytes.ipa).toBe(0)
+    expect(downloads?.kindBytes.apk).toBe(200)
+    expect(downloads?.kindBytes.aab).toBe(50)
+    expect(downloads?.kindBytes.dmg).toBe(64)
   })
 
   it('recusa esvaziar Downloads por completo', async () => {
@@ -195,7 +254,7 @@ describe('scan e clean', () => {
     await chmod(locked, 0o555)
 
     try {
-      const cleaned = await cleanCategories(home, ['developerArtifacts'])
+      const cleaned = await cleanCategories(home, ['downloads'])
       expect(cleaned.totalFreedBytes).toBe(430)
       expect(await readFile(path.join(home, 'Downloads', 'notes.txt'), 'utf8')).toBe('n'.repeat(999))
       expect(await readFile(path.join(locked, 'blocked.apk'), 'utf8')).toBe('z'.repeat(30))
@@ -212,7 +271,7 @@ describe('scan e clean', () => {
     await chmod(downloads, 0o555)
 
     try {
-      await expect(cleanCategories(home, ['developerArtifacts'])).rejects.toThrow('PERMISSION_DENIED')
+      await expect(cleanCategories(home, ['downloads'])).rejects.toThrow('PERMISSION_DENIED')
     } finally {
       await chmod(downloads, 0o755)
     }

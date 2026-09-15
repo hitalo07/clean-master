@@ -1,6 +1,6 @@
 import { app, Menu, nativeImage, Tray } from 'electron'
 import { join } from 'node:path'
-import { getLoginItemState, setOpenAtLogin } from './login-item'
+import { getLoginItemState, openLoginItemsSettings, setOpenAtLogin } from './login-item'
 
 let tray: Tray | null = null
 
@@ -38,6 +38,9 @@ export function refreshTrayMenu(showWindow: () => void): void {
         checked: login.openAtLogin,
         click: (item) => {
           setOpenAtLogin(item.checked)
+          if (item.checked) {
+            void openLoginItemsSettings()
+          }
           refreshTrayMenu(showWindow)
         }
       },

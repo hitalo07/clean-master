@@ -1,4 +1,4 @@
-import type { CategoryId, CleanResult, ScanResult } from '../shared/categories'
+import type { CleanRequest, CleanResult, ScanResult } from '../shared/categories'
 
 export interface LoginItemState {
   openAtLogin: boolean
@@ -8,7 +8,7 @@ export interface LoginItemState {
 export interface CleanMasterAPI {
   isPackaged: () => Promise<boolean>
   scan: () => Promise<ScanResult>
-  clean: (categoryIds: CategoryId[]) => Promise<CleanResult>
+  clean: (payload: CleanRequest) => Promise<CleanResult>
   openFullDiskAccess: () => Promise<void>
   getOpenAtLogin: () => Promise<LoginItemState>
   setOpenAtLogin: (enabled: boolean) => Promise<LoginItemState>

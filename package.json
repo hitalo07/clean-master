@@ -1,35 +1,35 @@
 {
-  "name": "clean-master-app",
-  "version": "0.1.0",
-  "productName": "Clean Master",
-  "description": "Limpador de lixo do Xcode para macOS",
-  "main": "./out/main/index.js",
-  "author": "",
-  "license": "ISC",
-  "scripts": {
-    "dev": "env -u ELECTRON_RUN_AS_NODE electron-vite dev",
-    "start": "env -u ELECTRON_RUN_AS_NODE electron-vite preview",
-    "build": "electron-vite build",
-    "build:mac": "npm run build && env -u ELECTRON_RUN_AS_NODE electron-builder --mac",
-    "typecheck": "tsc --noEmit -p tsconfig.node.json && tsc --noEmit -p tsconfig.web.json",
-    "test": "vitest run"
-  },
-  "dependencies": {
-    "react": "^19.2.1",
-    "react-dom": "^19.2.1"
-  },
-  "devDependencies": {
-    "@tailwindcss/vite": "^4.1.13",
-    "@types/node": "^24.5.2",
-    "@types/react": "^19.2.7",
-    "@types/react-dom": "^19.2.3",
-    "@vitejs/plugin-react": "^5.0.4",
-    "electron": "^44.3.0",
-    "electron-builder": "^26.0.12",
-    "electron-vite": "^5.0.0",
-    "tailwindcss": "^4.1.13",
-    "typescript": "^5.9.2",
-    "vite": "^7.1.7",
-    "vitest": "^5.0.0"
-  }
+	"name": "clean-master-app",
+	"version": "0.2.0",
+	"productName": "Clean Master",
+	"description": "Limpador de lixo do Xcode para macOS",
+	"main": "./out/main/index.js",
+	"author": "",
+	"license": "ISC",
+	"scripts": {
+		"dev": "node scripts/ensure-apple-events.cjs && env -u ELECTRON_RUN_AS_NODE electron-vite dev",
+		"start": "env -u ELECTRON_RUN_AS_NODE electron-vite preview",
+		"build": "electron-vite build",
+		"build:mac": "node scripts/ensure-apple-events.cjs --universal && npm run build && env -u ELECTRON_RUN_AS_NODE electron-builder --mac",
+		"typecheck": "tsc --noEmit -p tsconfig.node.json && tsc --noEmit -p tsconfig.web.json",
+		"test": "vitest run"
+	},
+	"dependencies": {
+		"react": "^19.2.1",
+		"react-dom": "^19.2.1"
+	},
+	"devDependencies": {
+		"@tailwindcss/vite": "^4.1.13",
+		"@types/node": "^24.5.2",
+		"@types/react": "^19.2.7",
+		"@types/react-dom": "^19.2.3",
+		"@vitejs/plugin-react": "^5.0.4",
+		"electron": "^44.3.0",
+		"electron-builder": "^26.0.12",
+		"electron-vite": "^5.0.0",
+		"tailwindcss": "^4.1.13",
+		"typescript": "^5.9.2",
+		"vite": "^7.1.7",
+		"vitest": "^5.0.0"
+	}
 }

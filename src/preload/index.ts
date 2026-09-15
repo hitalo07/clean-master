@@ -1,5 +1,5 @@
 import { contextBridge, ipcRenderer } from 'electron'
-import type { CategoryId, CleanResult, ScanResult } from '../shared/categories'
+import type { CleanRequest, CleanResult, ScanResult } from '../shared/categories'
 
 export interface LoginItemState {
   openAtLogin: boolean
@@ -8,8 +8,8 @@ export interface LoginItemState {
 
 const cleanMaster = {
   scan: (): Promise<ScanResult> => ipcRenderer.invoke('cleanup:scan'),
-  clean: (categoryIds: CategoryId[]): Promise<CleanResult> =>
-    ipcRenderer.invoke('cleanup:clean', categoryIds),
+  clean: (payload: CleanRequest): Promise<CleanResult> =>
+    ipcRenderer.invoke('cleanup:clean', payload),
   isPackaged: (): Promise<boolean> => ipcRenderer.invoke('system:isPackaged'),
   openFullDiskAccess: (): Promise<void> => ipcRenderer.invoke('system:openFullDiskAccess'),
   getOpenAtLogin: (): Promise<LoginItemState> => ipcRenderer.invoke('system:getOpenAtLogin'),

@@ -1,5 +1,5 @@
 import { homedir } from 'node:os'
-import { lstat, readdir, rm, unlink } from 'node:fs/promises'
+import { lstat, readdir, realpath, rm, unlink } from 'node:fs/promises'
 import path from 'node:path'
 import {
   CATEGORY_IDS,
@@ -7,10 +7,21 @@ import {
   type CategoryId,
   type CategoryScan,
   type CleanResult,
+  type DownloadKind,
   type ScanResult,
-  isDeveloperArtifactName
+  DOWNLOAD_KINDS,
+  downloadKindOf,
+  emptyKindBytes,
+  isDiskImageName
 } from '../shared/categories'
-import { emptyTrashViaFinder, isAutomationDenied } from './finder-trash'
+import {
+  emptyTrashViaFinder,
+  getTrashSizeViaFinder,
+  isAutomationDenied,
+  isTrashAlreadyEmpty,
+  isTrashCanceled,
+  pickTrashSize
+} from './finder-trash'
 
 export class CleanupError extends Error {
   constructor(message: string) {
@@ -73,6 +84,61 @@ export function parseCategoryIds(input: unknown): CategoryId[] {
   return [...unique] as CategoryId[]
 }
 
+export function parseDownloadsRelativePath(input: unknown): string {
+  if (typeof input !== 'string' || input.length === 0 || input.length > 1024) {
+    throw new CleanupError('Seleção inválida')
+  }
+  const unix = input.replaceAll('\\', '/')
+  if (unix.startsWith('/') || unix.includes('\0')) {
+    throw new CleanupError('Seleção inválida')
+  }
+  const parts = unix.split('/').filter((part) => part.length > 0)
+  if (parts.length === 0 || parts.some((part) => part === '.' || part === '..')) {
+    throw new CleanupError('Seleção inválida')
+  }
+  return parts.join('/')
+}
+
+export function parseCleanRequest(input: unknown): {
+  categoryIds: CategoryId[]
+  downloadKinds: DownloadKind[]
+  diskImages: string[]
+} {
+  if (!input || typeof input !== 'object' || Array.isArray(input)) {
+    throw new CleanupError('Seleção inválida')
+  }
+  const body = input as { categoryIds?: unknown; downloadKinds?: unknown; diskImages?: unknown }
+  if (body.diskImages !== undefined && (!Array.isArray(body.diskImages) || body.diskImages.length > 300)) {
+    throw new CleanupError('Seleção inválida')
+  }
+  const diskImages = Array.isArray(body.diskImages)
+    ? [...new Set(body.diskImages.map((value) => parseDownloadsRelativePath(value)))]
+    : []
+
+  return {
+    categoryIds: parseCategoryIds(body.categoryIds),
+    downloadKinds: parseDownloadKinds(body.downloadKinds),
+    diskImages
+  }
+}
+
+export function parseDownloadKinds(input: unknown): DownloadKind[] {
+  if (input === undefined) {
+    return []
+  }
+  if (!Array.isArray(input) || input.length > DOWNLOAD_KINDS.length) {
+    throw new CleanupError('Seleção inválida')
+  }
+  const unique = new Set<DownloadKind>()
+  for (const value of input) {
+    if (typeof value !== 'string' || !DOWNLOAD_KINDS.includes(value as DownloadKind)) {
+      throw new CleanupError('Seleção inválida')
+    }
+    unique.add(value as DownloadKind)
+  }
+  return [...unique]
+}
+
 // Resolve a pasta da categoria e impede sair do diretório home
 export function resolveCategoryDir(homeDir: string, categoryId: CategoryId): string {
   const home = path.resolve(homeDir)
@@ -84,6 +150,15 @@ export function resolveCategoryDir(homeDir: string, categoryId: CategoryId): str
   }
 
   return target
+}
+
+async function resolveExistingCategoryDir(homeDir: string, categoryId: CategoryId): Promise<string> {
+  const dirPath = resolveCategoryDir(homeDir, categoryId)
+  try {
+    return await realpath(dirPath)
+  } catch {
+    return dirPath
+  }
 }
 
 export function assertInsideAllowedRoot(allowedRoot: string, candidate: string): void {
@@ -102,7 +177,7 @@ function isRealUserHome(homeDir: string): boolean {
 
 function toCategoryScan(
   id: CategoryId,
-  overrides: Partial<Pick<CategoryScan, 'bytes' | 'exists' | 'permissionDenied' | 'unknownSize'>>
+  overrides: Partial<Omit<CategoryScan, 'id' | 'label' | 'description'>>
 ): CategoryScan {
   const meta = CATEGORY_META[id]
   return {
@@ -110,9 +185,12 @@ function toCategoryScan(
     label: meta.label,
     description: meta.description,
     bytes: 0,
+    artifactBytes: 0,
+    kindBytes: emptyKindBytes(),
     exists: true,
     permissionDenied: false,
     unknownSize: false,
+    files: [],
     ...overrides
   }
 }
@@ -198,10 +276,48 @@ export async function getDirectorySize(dirPath: string): Promise<number> {
   return total
 }
 
-async function collectDeveloperArtifacts(
-  downloadsRoot: string
-): Promise<Array<{ path: string; size: number }>> {
-  const found: Array<{ path: string; size: number }> = []
+async function measureTrash(
+  homeDir: string,
+  dirPath: string,
+  status: 'missing' | 'ok' | 'denied'
+): Promise<{ bytes: number; unknownSize: boolean }> {
+  if (status === 'ok') {
+    try {
+      return pickTrashSize(await getDirectorySize(dirPath), null)
+    } catch (error) {
+      if (!(error instanceof PermissionError)) {
+        throw error
+      }
+      if (!isRealUserHome(homeDir)) {
+        return pickTrashSize(null, null)
+      }
+    }
+  }
+
+  if (!isRealUserHome(homeDir)) {
+    return pickTrashSize(null, status === 'denied' ? null : 0)
+  }
+
+  try {
+    return pickTrashSize(null, await getTrashSizeViaFinder())
+  } catch {
+    return pickTrashSize(null, null)
+  }
+}
+
+type DownloadsMatch = {
+  path: string
+  relativePath: string
+  size: number
+  kind: DownloadKind
+}
+
+function toDownloadsRelativePath(downloadsRoot: string, fullPath: string): string {
+  return path.relative(downloadsRoot, fullPath).split(path.sep).join('/')
+}
+
+async function collectDownloadsMatches(downloadsRoot: string): Promise<DownloadsMatch[]> {
+  const found: DownloadsMatch[] = []
   const stack = [downloadsRoot]
 
   while (stack.length > 0) {
@@ -210,9 +326,9 @@ async function collectDeveloperArtifacts(
       break
     }
 
-    let names: string[]
+    let entries
     try {
-      names = await readdir(current)
+      entries = await readdir(current, { withFileTypes: true })
     } catch (error) {
       if (isFsPermissionError(error) && path.resolve(current) === path.resolve(downloadsRoot)) {
         throw new PermissionError()
@@ -220,9 +336,16 @@ async function collectDeveloperArtifacts(
       continue
     }
 
-    for (const name of names) {
-      const fullPath = path.join(current, name)
+    for (const entry of entries) {
+      if (entry.name.startsWith('._')) {
+        continue
+      }
+      const fullPath = path.join(current, entry.name)
       try {
+        if (entry.isDirectory()) {
+          stack.push(fullPath)
+          continue
+        }
         const fileStat = await lstat(fullPath)
         if (fileStat.isSymbolicLink()) {
           continue
@@ -231,10 +354,20 @@ async function collectDeveloperArtifacts(
           stack.push(fullPath)
           continue
         }
-        if (fileStat.isFile() && isDeveloperArtifactName(name)) {
-          assertInsideAllowedRoot(downloadsRoot, fullPath)
-          found.push({ path: fullPath, size: fileStat.size })
+        if (!fileStat.isFile()) {
+          continue
         }
+        const kind = downloadKindOf(entry.name)
+        if (!kind) {
+          continue
+        }
+        assertInsideAllowedRoot(downloadsRoot, fullPath)
+        found.push({
+          path: fullPath,
+          relativePath: toDownloadsRelativePath(downloadsRoot, fullPath),
+          size: fileStat.size,
+          kind
+        })
       } catch {
         continue
       }
@@ -244,21 +377,46 @@ async function collectDeveloperArtifacts(
   return found
 }
 
-async function getDeveloperArtifactsSize(dirPath: string): Promise<number> {
-  const files = await collectDeveloperArtifacts(dirPath)
-  return files.reduce((sum, file) => sum + file.size, 0)
+async function scanDownloads(dirPath: string): Promise<{
+  bytes: number
+  artifactBytes: number
+  kindBytes: Record<DownloadKind, number>
+  files: CategoryScan['files']
+}> {
+  const found = await collectDownloadsMatches(dirPath)
+  const kindBytes = emptyKindBytes()
+  for (const file of found) {
+    kindBytes[file.kind] += file.size
+  }
+  const artifacts = found.filter((file) => file.kind !== 'dmg')
+  const diskImages = found.filter((file) => file.kind === 'dmg')
+  return {
+    bytes: found.reduce((sum, file) => sum + file.size, 0),
+    artifactBytes: artifacts.reduce((sum, file) => sum + file.size, 0),
+    kindBytes,
+    files: diskImages.map((file) => ({
+      name: path.basename(file.path),
+      relativePath: file.relativePath,
+      bytes: file.size
+    }))
+  }
 }
 
-async function removeDeveloperArtifacts(homeDir: string, dirPath: string): Promise<number> {
+async function removeDeveloperArtifacts(
+  homeDir: string,
+  dirPath: string,
+  kinds: DownloadKind[]
+): Promise<number> {
   assertAllowedCategoryDir(homeDir, dirPath)
-  const files = await collectDeveloperArtifacts(dirPath)
+  const allowed = new Set<DownloadKind>(kinds.filter((kind) => kind !== 'dmg'))
+  const files = (await collectDownloadsMatches(dirPath)).filter((file) => allowed.has(file.kind))
   let freed = 0
   let denied = 0
 
   for (const file of files) {
     try {
       assertInsideAllowedRoot(dirPath, file.path)
-      if (!isDeveloperArtifactName(path.basename(file.path))) {
+      if (downloadKindOf(path.basename(file.path)) !== file.kind) {
         continue
       }
       const fileStat = await lstat(file.path)
@@ -286,10 +444,55 @@ async function removeDeveloperArtifacts(homeDir: string, dirPath: string): Promi
   return freed
 }
 
+async function removeDiskImages(
+  homeDir: string,
+  dirPath: string,
+  relativePaths: string[]
+): Promise<number> {
+  assertAllowedCategoryDir(homeDir, dirPath)
+  let freed = 0
+  let denied = 0
+
+  for (const relativePath of relativePaths) {
+    const safeRelative = parseDownloadsRelativePath(relativePath)
+    const fullPath = path.join(dirPath, ...safeRelative.split('/'))
+    try {
+      assertInsideAllowedRoot(dirPath, fullPath)
+      if (!isDiskImageName(path.basename(fullPath))) {
+        continue
+      }
+      const fileStat = await lstat(fullPath)
+      if (fileStat.isSymbolicLink() || !fileStat.isFile()) {
+        continue
+      }
+      await unlink(fullPath)
+      freed += fileStat.size
+    } catch (error) {
+      if (error instanceof CleanupError && error.message === 'Seleção inválida') {
+        continue
+      }
+      if (isFsPermissionError(error)) {
+        denied += 1
+        continue
+      }
+      if (isSkippableFsError(error)) {
+        continue
+      }
+      throw error
+    }
+  }
+
+  if (freed === 0 && denied > 0) {
+    throw new PermissionError()
+  }
+
+  return freed
+}
+
 // Esvazia a pasta da categoria sem sair da lista branca
 export async function emptyDirectory(homeDir: string, dirPath: string): Promise<void> {
   assertAllowedCategoryDir(homeDir, dirPath)
-  if (path.resolve(dirPath) === resolveCategoryDir(homeDir, 'developerArtifacts')) {
+  if (path.resolve(dirPath) === resolveCategoryDir(homeDir, 'downloads')) {
     throw new CleanupError('Downloads não pode ser esvaziada')
   }
 
@@ -345,33 +548,43 @@ export async function scanCategories(homeDir: string): Promise<ScanResult> {
   const categories = []
 
   for (const id of CATEGORY_IDS) {
-    const dirPath = resolveCategoryDir(homeDir, id)
+    const dirPath = await resolveExistingCategoryDir(homeDir, id)
     const status = await inspectDirectory(dirPath)
     let bytes = 0
+    let artifactBytes = 0
+    let kindBytes = emptyKindBytes()
+    let files: CategoryScan['files'] = []
     let permissionDenied = status === 'denied' && id !== 'trash'
     let unknownSize = false
     const exists = status !== 'missing' || id === 'trash'
 
-    if (status === 'ok') {
+    if (id === 'trash') {
+      const trash = await measureTrash(homeDir, dirPath, status)
+      bytes = trash.bytes
+      unknownSize = trash.unknownSize
+    } else if (status === 'ok') {
       try {
-        bytes =
-          id === 'developerArtifacts'
-            ? await getDeveloperArtifactsSize(dirPath)
-            : await getDirectorySize(dirPath)
+        if (id === 'downloads') {
+          const downloads = await scanDownloads(dirPath)
+          bytes = downloads.bytes
+          artifactBytes = downloads.artifactBytes
+          files = downloads.files
+          kindBytes = downloads.kindBytes
+        } else {
+          bytes = await getDirectorySize(dirPath)
+        }
       } catch (error) {
-        if (error instanceof PermissionError && id === 'trash') {
-          unknownSize = true
-        } else if (error instanceof PermissionError) {
+        if (error instanceof PermissionError) {
           permissionDenied = true
         } else {
           throw error
         }
       }
-    } else if (id === 'trash' && status === 'denied') {
-      unknownSize = true
     }
 
-    categories.push(toCategoryScan(id, { bytes, exists, permissionDenied, unknownSize }))
+    categories.push(
+      toCategoryScan(id, { bytes, artifactBytes, kindBytes, exists, permissionDenied, unknownSize, files })
+    )
   }
 
   return {
@@ -383,7 +596,8 @@ export async function scanCategories(homeDir: string): Promise<ScanResult> {
 // Remove o conteúdo das categorias selecionadas
 export async function cleanCategories(
   homeDir: string,
-  categoryIds: CategoryId[]
+  categoryIds: CategoryId[],
+  options: { downloadKinds?: DownloadKind[]; diskImages?: string[] } = {}
 ): Promise<CleanResult> {
   const categories = []
 
@@ -391,12 +605,21 @@ export async function cleanCategories(
     const dirPath = resolveCategoryDir(homeDir, id)
     const status = await inspectDirectory(dirPath)
 
-    if (id === 'trash' && status !== 'ok' && isRealUserHome(homeDir)) {
+    if (id === 'trash' && isRealUserHome(homeDir)) {
+      const trash = await measureTrash(homeDir, dirPath, status)
+      const freedBytes = trash.bytes
       try {
         await emptyTrashViaFinder()
-        categories.push({ id, freedBytes: 0 })
+        categories.push({ id, freedBytes })
         continue
       } catch (error) {
+        if (isTrashAlreadyEmpty(error)) {
+          categories.push({ id, freedBytes: 0 })
+          continue
+        }
+        if (isTrashCanceled(error)) {
+          throw new CleanupError('A exclusão da Lixeira foi cancelada no diálogo do macOS.')
+        }
         if (isAutomationDenied(error) || isFsPermissionError(error)) {
           throw new PermissionError()
         }
@@ -408,8 +631,18 @@ export async function cleanCategories(
       throw new PermissionError()
     }
 
-    if (id === 'developerArtifacts') {
-      const freedBytes = status === 'ok' ? await removeDeveloperArtifacts(homeDir, dirPath) : 0
+    if (id === 'downloads') {
+      let freedBytes = 0
+      if (status === 'ok') {
+        const kinds = options.downloadKinds ?? ['ipa', 'apk', 'aab']
+        const artifactKinds = kinds.filter((kind) => kind !== 'dmg')
+        if (artifactKinds.length > 0) {
+          freedBytes += await removeDeveloperArtifacts(homeDir, dirPath, artifactKinds)
+        }
+        if (kinds.includes('dmg') && options.diskImages && options.diskImages.length > 0) {
+          freedBytes += await removeDiskImages(homeDir, dirPath, options.diskImages)
+        }
+      }
       categories.push({ id, freedBytes })
       continue
     }

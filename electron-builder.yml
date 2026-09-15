@@ -12,11 +12,16 @@ mac:
       arch:
         - universal
   identity: "Apple Development: Hitalo Cunha de Sousa (H2XKQKNL2Y)"
+  hardenedRuntime: true
+  entitlements: build/entitlements.mac.plist
+  entitlementsInherit: build/entitlements.mac.inherit.plist
   extendInfo:
-    NSAppleEventsUsageDescription: O Clean Master usa o Finder para esvaziar a Lixeira.
+    NSAppleEventsUsageDescription: O Clean Master usa o Finder para medir o tamanho da Lixeira e esvaziá-la.
     NSDownloadsFolderUsageDescription: O Clean Master acessa Downloads só para encontrar arquivos .ipa, .apk e .aab.
-extraResources:
-  - from: build/tray.png
-    to: tray.png
+  extraResources:
+    - from: build/tray.png
+      to: tray.png
+    - from: build/ask-finder-automation
+      to: ask-finder-automation
 dmg:
   artifactName: ${productName}-${version}-mac.${ext}

@@ -5,3 +5,6 @@ dist
 .DS_Store
 .vscode
 .idea
+build/ask-finder-automation
+build/ask-finder-automation-arm64
+build/ask-finder-automation-x64

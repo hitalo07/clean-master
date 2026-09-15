@@ -1,4 +1,6 @@
-import { app } from 'electron'
+import { app, shell } from 'electron'
+
+export const LOGIN_ITEMS_URL = 'x-apple.systempreferences:com.apple.LoginItems-Settings.extension'
 
 export interface LoginItemState {
   openAtLogin: boolean
@@ -21,4 +23,8 @@ export function setOpenAtLogin(enabled: boolean): LoginItemState {
     type: 'mainAppService'
   })
   return getLoginItemState()
+}
+
+export async function openLoginItemsSettings(): Promise<void> {
+  await shell.openExternal(LOGIN_ITEMS_URL)
 }

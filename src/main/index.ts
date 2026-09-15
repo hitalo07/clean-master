@@ -1,29 +1,17 @@
-import { app, BrowserWindow, clipboard, dialog, ipcMain, shell } from 'electron'
+import { app, BrowserWindow, ipcMain } from 'electron'
 import { homedir } from 'node:os'
-import { join, resolve } from 'node:path'
-import { readdir } from 'node:fs/promises'
+import { join } from 'node:path'
+import { cleanCategories, CleanupError, parseCleanRequest, scanCategories } from './cleanup'
+import { getLoginItemState, openLoginItemsSettings, setOpenAtLogin } from './login-item'
 import {
-  cleanCategories,
-  CleanupError,
-  isFsPermissionError,
-  parseCategoryIds,
-  scanCategories
-} from './cleanup'
-import { getLoginItemState, setOpenAtLogin } from './login-item'
+  ensureScanPermissions,
+  openFullDiskAccessHelp,
+  requestDownloadsAccess
+} from './scan-permissions'
 import { createTray, refreshTrayMenu } from './tray'
 import { parseEnabledFlag } from '../shared/flags'
 
-const FULL_DISK_ACCESS_URL =
-  'x-apple.systempreferences:com.apple.preference.security?Privacy_AllFiles'
-const LOGIN_ITEMS_URL = 'x-apple.systempreferences:com.apple.LoginItems-Settings.extension'
-const FILES_AND_FOLDERS_URL =
-  'x-apple.systempreferences:com.apple.preference.security?Privacy_FilesAndFolders'
-
 app.setName('Clean Master')
-
-function getAppBundlePath(): string {
-  return resolve(process.execPath, '..', '..', '..')
-}
 
 let mainWindow: BrowserWindow | null = null
 let isQuitting = false
@@ -84,6 +72,7 @@ function registerIpc(): void {
     }
 
     try {
+      await ensureScanPermissions(homedir(), mainWindow)
       return await scanCategories(homedir())
     } catch (error) {
       if (error instanceof CleanupError) {
@@ -100,8 +89,11 @@ function registerIpc(): void {
     }
 
     try {
-      const categoryIds = parseCategoryIds(payload)
-      return await cleanCategories(homedir(), categoryIds)
+      const request = parseCleanRequest(payload)
+      return await cleanCategories(homedir(), request.categoryIds, {
+        downloadKinds: request.downloadKinds,
+        diskImages: request.diskImages
+      })
     } catch (error) {
       if (error instanceof CleanupError) {
         throw error
@@ -117,10 +109,7 @@ function registerIpc(): void {
 
   ipcMain.handle('system:openFullDiskAccess', async () => {
     try {
-      const bundlePath = getAppBundlePath()
-      clipboard.writeText(bundlePath)
-      shell.showItemInFolder(bundlePath)
-      await shell.openExternal(FULL_DISK_ACCESS_URL)
+      await openFullDiskAccessHelp()
     } catch {
       throw new CleanupError('Não foi possível abrir os Ajustes do macOS.')
     }
@@ -135,8 +124,8 @@ function registerIpc(): void {
       const enabled = parseEnabledFlag(payload)
       const state = setOpenAtLogin(enabled)
       refreshTrayMenu(showWindow)
-      if (enabled && state.requiresApproval) {
-        await shell.openExternal(LOGIN_ITEMS_URL)
+      if (enabled) {
+        await openLoginItemsSettings()
       }
       return state
     } catch (error) {
@@ -148,41 +137,13 @@ function registerIpc(): void {
   })
 
   ipcMain.handle('system:requestDownloadsAccess', async () => {
-    const downloads = resolve(homedir(), 'Downloads')
-    const dialogOptions = {
-      title: 'Permitir acesso a Downloads',
-      message: 'Selecione a pasta Downloads para limpar arquivos .ipa, .apk e .aab.',
-      defaultPath: downloads,
-      buttonLabel: 'Permitir',
-      properties: ['openDirectory' as const]
-    }
-    const result = mainWindow
-      ? await dialog.showOpenDialog(mainWindow, dialogOptions)
-      : await dialog.showOpenDialog(dialogOptions)
-
-    if (result.canceled || result.filePaths.length === 0) {
-      return { granted: false }
-    }
-
-    if (resolve(result.filePaths[0]) !== downloads) {
-      throw new CleanupError('Selecione a pasta Downloads')
-    }
-
-    try {
-      await readdir(downloads)
-      return { granted: true }
-    } catch (error) {
-      if (isFsPermissionError(error)) {
-        await shell.openExternal(FILES_AND_FOLDERS_URL)
-        return { granted: false }
-      }
-      throw new CleanupError('Não foi possível acessar a pasta Downloads.')
-    }
+    const granted = await requestDownloadsAccess(homedir(), mainWindow)
+    return { granted }
   })
 
   ipcMain.handle('system:openLoginItemsSettings', async () => {
     try {
-      await shell.openExternal(LOGIN_ITEMS_URL)
+      await openLoginItemsSettings()
     } catch {
       throw new CleanupError('Não foi possível abrir os Ajustes do macOS.')
     }

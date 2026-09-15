@@ -1,7 +1,18 @@
 import { useEffect, useId, useMemo, useState, type ReactNode } from 'react'
 import { formatBytes } from '../../shared/format'
+import { orbDashOffset } from '../../shared/orb'
 import { permissionAppName } from '../../shared/flags'
-import type { CategoryId, CategoryScan, ScanResult } from '../../shared/categories'
+import {
+  CATEGORY_IDS,
+  DOWNLOAD_KINDS,
+  emptyCategoryScan,
+  emptyKindBytes,
+  type CategoryFile,
+  type CategoryId,
+  type CategoryScan,
+  type DownloadKind,
+  type ScanResult
+} from '../../shared/categories'
 
 type AppStatus = 'idle' | 'scanning' | 'ready' | 'confirm' | 'cleaning' | 'done' | 'error'
 
@@ -22,7 +33,22 @@ export default function App() {
   const [openAtLogin, setOpenAtLogin] = useState(false)
   const [loginNeedsApproval, setLoginNeedsApproval] = useState(false)
   const [isPackaged, setIsPackaged] = useState(!import.meta.env.DEV)
+  const [selectedKinds, setSelectedKinds] = useState<Record<DownloadKind, boolean>>({
+    ipa: true,
+    apk: true,
+    aab: true,
+    dmg: true
+  })
+  const [selectedDiskImages, setSelectedDiskImages] = useState<string[]>([])
   const appName = permissionAppName(isPackaged)
+  const categoryRows = CATEGORY_IDS.map((id) => {
+    const item = scan?.categories.find((entry) => entry.id === id) ?? emptyCategoryScan(id)
+    return {
+      ...item,
+      kindBytes: item.kindBytes ?? emptyKindBytes(),
+      files: item.files ?? []
+    }
+  })
 
   useEffect(() => {
     document.documentElement.classList.toggle('dark', theme === 'dark')
@@ -52,25 +78,32 @@ export default function App() {
   }
 
   const selectedBytes = useMemo(() => {
-    if (!scan) {
-      return 0
-    }
-    return scan.categories
+    return categoryRows
       .filter((item) => selected.includes(item.id) && !item.permissionDenied)
-      .reduce((sum, item) => sum + item.bytes, 0)
-  }, [scan, selected])
+      .reduce(
+        (sum, item) =>
+          sum + categoryPreviewBytes(item, selected.includes(item.id), selectedKinds, selectedDiskImages),
+        0
+      )
+  }, [categoryRows, selected, selectedDiskImages, selectedKinds])
 
   const needsDiskAccess =
     scan?.categories.some(
-      (item) => item.id !== 'developerArtifacts' && (item.permissionDenied || item.unknownSize)
+      (item) => item.id !== 'downloads' && (item.permissionDenied || item.unknownSize)
     ) ?? false
   const needsDownloadsAccess =
-    scan?.categories.some((item) => item.id === 'developerArtifacts' && item.permissionDenied) ??
+    scan?.categories.some((item) => item.id === 'downloads' && item.permissionDenied) ??
     false
 
   const canClean = selected.some((id) => {
-    const item = scan?.categories.find((category) => category.id === id)
-    return Boolean(item && !item.permissionDenied)
+    const item = categoryRows.find((category) => category.id === id)
+    if (!item || item.permissionDenied) {
+      return false
+    }
+    if (item.id === 'trash') {
+      return item.bytes > 0 || item.unknownSize
+    }
+    return categoryPreviewBytes(item, true, selectedKinds, selectedDiskImages) > 0
   })
 
   async function handleScan() {
@@ -83,10 +116,16 @@ export default function App() {
     setScan(null)
     setFreedBytes(0)
     setErrorMessage('')
+    setSelectedKinds({ ipa: true, apk: true, aab: true, dmg: true })
     try {
       const result = await window.cleanMaster.scan()
       setScan(result)
-      setSelected(result.categories.filter((item) => !item.permissionDenied).map((item) => item.id))
+      setSelected(selectionAfterScan(result))
+      setSelectedKinds({ ipa: true, apk: true, aab: true, dmg: true })
+      setSelectedDiskImages(
+        result.categories.find((item) => item.id === 'downloads')?.files.map((file) => file.relativePath) ??
+          []
+      )
       setStatus('ready')
     } catch (error) {
       if (isPermissionDenied(error)) {
@@ -118,54 +157,81 @@ export default function App() {
     }
   }
 
+  function resetToIdle() {
+    setStatus('idle')
+    setScan(null)
+    setSelected([])
+    setFreedBytes(0)
+    setErrorMessage('')
+    setSelectedKinds({ ipa: true, apk: true, aab: true, dmg: true })
+    setSelectedDiskImages([])
+  }
+
   async function handleClean() {
     if (selected.length === 0 || !canClean) {
+      resetToIdle()
+      return
+    }
+    if (selectedBytes === 0 && !selected.includes('trash')) {
+      resetToIdle()
       return
     }
     setStatus('cleaning')
     try {
-      const result = await window.cleanMaster.clean(selected)
+      const downloadKinds = DOWNLOAD_KINDS.filter((kind) => selectedKinds[kind])
+      const result = await window.cleanMaster.clean({
+        categoryIds: selected,
+        downloadKinds: selected.includes('downloads') ? downloadKinds : [],
+        diskImages: selected.includes('downloads') && selectedKinds.dmg ? selectedDiskImages : []
+      })
+      if (result.totalFreedBytes === 0) {
+        resetToIdle()
+        return
+      }
       setFreedBytes(result.totalFreedBytes)
-      setScan((current) =>
-        current
-          ? {
-              ...current,
-              totalBytes: current.categories
-                .filter((item) => !selected.includes(item.id))
-                .reduce((sum, item) => sum + item.bytes, 0),
-              categories: current.categories.map((item) =>
-                selected.includes(item.id) ? { ...item, bytes: 0 } : item
-              )
-            }
-          : current
-      )
       setSelected([])
+      setSelectedDiskImages([])
       setStatus('done')
     } catch (error) {
-      setStatus('ready')
       if (isPermissionDenied(error)) {
+        setStatus('ready')
         setErrorMessage(
-          `O macOS bloqueou a exclusão. Dê permissão ao ${appName} em Downloads, no Finder ou no Acesso Total ao Disco e tente de novo.`
+          `O macOS bloqueou a exclusão. Dê permissão ao ${appName} para controlar o Finder (Lixeira), ou autorize Downloads e o Acesso Total ao Disco.`
         )
         return
       }
-      setErrorMessage('Não foi possível limpar os arquivos selecionados. Feche o Xcode e tente de novo.')
+      const detail = userFacingCleanError(error)
+      if (detail) {
+        setStatus('ready')
+        setErrorMessage(detail)
+        return
+      }
+      resetToIdle()
     }
   }
 
   function toggleCategory(id: CategoryId) {
     const blocked = scan?.categories.find((item) => item.id === id)?.permissionDenied
     if (blocked) {
-      if (id === 'developerArtifacts') {
+      if (id === 'downloads') {
         void handleDownloadsAccess()
         return
       }
       void window.cleanMaster?.openFullDiskAccess()
       return
     }
-    setSelected((current) =>
-      current.includes(id) ? current.filter((item) => item !== id) : [...current, id]
-    )
+    setSelected((current) => {
+      const next = current.includes(id) ? current.filter((item) => item !== id) : [...current, id]
+      if (id === 'downloads' && next.includes('downloads')) {
+        setSelectedKinds({ ipa: true, apk: true, aab: true, dmg: true })
+        setSelectedDiskImages(
+          scan?.categories
+            .find((item) => item.id === 'downloads')
+            ?.files.map((file) => file.relativePath) ?? []
+        )
+      }
+      return next
+    })
   }
 
   return (
@@ -218,8 +284,12 @@ export default function App() {
         <div className="titlebar h-11 shrink-0" />
         <div className="flex flex-1 items-start justify-center overflow-y-auto px-8 py-4">
           <section className="rise-in my-auto w-full max-w-3xl rounded-[28px] border border-slate-200 bg-white p-6 shadow-[0_24px_80px_rgba(16,32,51,0.08)] dark:border-line dark:bg-panel dark:shadow-[0_24px_80px_rgba(0,0,0,0.28)]">
+            {status === 'done' ? (
+              <SuccessScreen bytes={freedBytes} onAgain={handleScan} />
+            ) : (
+              <>
             <ScanOrb
-              bytes={status === 'done' ? freedBytes : scan?.totalBytes ?? 0}
+              bytes={status === 'ready' || status === 'confirm' ? selectedBytes : (scan?.totalBytes ?? 0)}
               scanning={status === 'scanning' || status === 'cleaning'}
               status={status}
             />
@@ -236,17 +306,45 @@ export default function App() {
               <PermissionBanner isPackaged={isPackaged} />
             ) : null}
 
-            {scan && (status === 'ready' || status === 'confirm' || status === 'done') ? (
+            {status === 'ready' || status === 'confirm' ? (
               <div className="mt-5 grid gap-3">
-                {scan.categories.map((item, index) => (
-                  <CategoryRow
-                    key={item.id}
-                    item={item}
-                    selected={selected.includes(item.id)}
-                    disabled={status !== 'ready' && status !== 'confirm'}
-                    delay={index * 60}
-                    onToggle={() => toggleCategory(item.id)}
-                  />
+                {categoryRows.map((item, index) => (
+                  <div key={item.id}>
+                    <CategoryRow
+                      item={item}
+                      previewBytes={categoryPreviewBytes(
+                        item,
+                        selected.includes(item.id),
+                        selectedKinds,
+                        selectedDiskImages
+                      )}
+                      selected={selected.includes(item.id)}
+                      disabled={status !== 'ready' && status !== 'confirm'}
+                      delay={index * 60}
+                      onToggle={() => toggleCategory(item.id)}
+                    />
+                    {item.id === 'downloads' &&
+                    selected.includes('downloads') &&
+                    !item.permissionDenied &&
+                    (status === 'ready' || status === 'confirm') ? (
+                      <DownloadsOptions
+                        kindBytes={item.kindBytes}
+                        selectedKinds={selectedKinds}
+                        diskImages={item.files}
+                        selectedDiskImages={selectedDiskImages}
+                        onToggleKind={(kind) =>
+                          setSelectedKinds((current) => ({ ...current, [kind]: !current[kind] }))
+                        }
+                        onToggleDiskImage={(relativePath) =>
+                          setSelectedDiskImages((current) =>
+                            current.includes(relativePath)
+                              ? current.filter((path) => path !== relativePath)
+                              : [...current, relativePath]
+                          )
+                        }
+                      />
+                    ) : null}
+                  </div>
                 ))}
               </div>
             ) : null}
@@ -278,10 +376,9 @@ export default function App() {
                   </PrimaryButton>
                 </>
               ) : null}
-              {status === 'done' ? (
-                <PrimaryButton onClick={handleScan}>Nova análise</PrimaryButton>
-              ) : null}
             </div>
+              </>
+            )}
           </section>
         </div>
       </main>
@@ -289,27 +386,165 @@ export default function App() {
   )
 }
 
+function selectionAfterScan(result: ScanResult): CategoryId[] {
+  const selected = result.categories
+    .filter((item) => !item.permissionDenied)
+    .map((item) => item.id)
+  if (!selected.includes('downloads')) {
+    selected.push('downloads')
+  }
+  return selected
+}
+
+function categoryPreviewBytes(
+  item: CategoryScan,
+  isSelected: boolean,
+  selectedKinds: Record<DownloadKind, boolean>,
+  selectedDiskImages: string[]
+): number {
+  if (!isSelected || item.permissionDenied) {
+    return 0
+  }
+  if (item.id !== 'downloads') {
+    return item.bytes
+  }
+  const artifacts = (['ipa', 'apk', 'aab'] as const).reduce(
+    (total, kind) => total + (selectedKinds[kind] ? item.kindBytes[kind] : 0),
+    0
+  )
+  const disks = selectedKinds.dmg
+    ? item.files
+        .filter((file) => selectedDiskImages.includes(file.relativePath))
+        .reduce((total, file) => total + file.bytes, 0)
+    : 0
+  return artifacts + disks
+}
+
 function isPermissionDenied(error: unknown): boolean {
   return error instanceof Error && error.message.includes('PERMISSION_DENIED')
 }
 
+function userFacingCleanError(error: unknown): string | null {
+  if (!(error instanceof Error)) {
+    return null
+  }
+  if (error.message.includes('Lixeira foi cancelada')) {
+    return 'A exclusão da Lixeira foi cancelada no diálogo do macOS.'
+  }
+  return null
+}
+
 function copyForStatus(status: AppStatus, selectedBytes: number): string {
   if (status === 'scanning') {
-    return 'Varrendo lixo do Xcode, a Lixeira e artefatos em Downloads…'
+    return 'Pedindo permissões e em seguida analisando Xcode, Lixeira e Downloads…'
   }
   if (status === 'cleaning') {
     return 'Removendo os arquivos selecionados…'
   }
   if (status === 'confirm') {
-    return `Isso apaga ${formatBytes(selectedBytes)} das pastas selecionadas. Artefatos de desenvolvedor remove só .ipa, .apk e .aab em Downloads.`
-  }
-  if (status === 'done') {
-    return 'Limpeza concluída. O Xcode volta a gerar esses arquivos quando você abrir um projeto.'
+    return `Isso apaga ${formatBytes(selectedBytes)} do que você marcou. Em Downloads só saem as extensões e os DMGs selecionados.`
   }
   if (status === 'ready') {
-    return 'Selecione o que deseja remover. Nada fora das pastas permitidas é alterado.'
+    return selectedBytes > 0
+      ? `A análise encontrou ${formatBytes(selectedBytes)} para liberar. Desmarque o que quiser manter.`
+      : 'Selecione o que deseja remover. Nada fora das pastas permitidas é alterado.'
   }
-  return 'Encontre lixo do Xcode, esvazie a Lixeira e remova .ipa, .apk e .aab de Downloads.'
+  return 'Encontre lixo do Xcode, esvazie a Lixeira e limpe Downloads (.ipa, .apk, .aab e .dmg).'
+}
+
+function DownloadsOptions({
+  kindBytes,
+  selectedKinds,
+  diskImages,
+  selectedDiskImages,
+  onToggleKind,
+  onToggleDiskImage
+}: {
+  kindBytes: Record<DownloadKind, number>
+  selectedKinds: Record<DownloadKind, boolean>
+  diskImages: CategoryFile[]
+  selectedDiskImages: string[]
+  onToggleKind: (kind: DownloadKind) => void
+  onToggleDiskImage: (relativePath: string) => void
+}) {
+  const labels: Record<DownloadKind, string> = {
+    ipa: 'Arquivos .ipa',
+    apk: 'Arquivos .apk',
+    aab: 'Arquivos .aab',
+    dmg: 'Arquivos .dmg'
+  }
+
+  return (
+    <div className="mt-2 rounded-2xl border border-slate-200 bg-white px-4 py-3 dark:border-line dark:bg-panel">
+      <p className="text-xs font-medium uppercase tracking-[0.16em] text-slate-400">
+        Escolha o que apagar em Downloads
+      </p>
+      <div className="mt-3 grid gap-2">
+        {DOWNLOAD_KINDS.map((kind) => (
+          <label key={kind} className="flex items-center gap-3 text-sm">
+            <input
+              checked={selectedKinds[kind]}
+              onChange={() => onToggleKind(kind)}
+              type="checkbox"
+            />
+            <span className="flex-1">{labels[kind]}</span>
+            <span className="text-xs text-slate-400">{formatBytes(kindBytes[kind])}</span>
+          </label>
+        ))}
+      </div>
+      {selectedKinds.dmg ? (
+        <>
+          <p className="mt-3 text-xs font-medium uppercase tracking-[0.16em] text-slate-400">
+            Quais DMGs apagar
+          </p>
+          {diskImages.length === 0 ? (
+            <p className="mt-2 text-sm text-slate-500">Nenhum .dmg encontrado em Downloads.</p>
+          ) : (
+            <ul className="mt-2 max-h-40 space-y-2 overflow-y-auto">
+              {diskImages.map((file) => (
+                <li key={file.relativePath}>
+                  <label className="flex items-center gap-3 text-sm">
+                    <input
+                      checked={selectedDiskImages.includes(file.relativePath)}
+                      onChange={() => onToggleDiskImage(file.relativePath)}
+                      type="checkbox"
+                    />
+                    <span className="min-w-0 flex-1 truncate">{file.name}</span>
+                    <span className="shrink-0 text-xs text-slate-400">{formatBytes(file.bytes)}</span>
+                  </label>
+                </li>
+              ))}
+            </ul>
+          )}
+        </>
+      ) : null}
+    </div>
+  )
+}
+
+function SuccessScreen({ bytes, onAgain }: { bytes: number; onAgain: () => void }) {
+  return (
+    <div className="flex flex-col items-center py-6 text-center">
+      <div className="relative flex h-44 w-44 items-center justify-center">
+        <div className="pulse-glow absolute inset-4 rounded-full bg-gradient-to-br from-accent/40 to-accent-2/30 blur-2xl" />
+        <div className="relative flex h-28 w-28 items-center justify-center rounded-full bg-gradient-to-br from-accent to-accent-2 text-ink shadow-[0_16px_40px_rgba(61,220,151,0.35)]">
+          <BroomIcon />
+        </div>
+      </div>
+      <p className="mt-2 text-xs font-medium uppercase tracking-[0.22em] text-slate-400">
+        Tudo limpo
+      </p>
+      <p className="mt-2 text-3xl font-semibold tracking-tight text-slate-900 dark:text-white">
+        {formatBytes(bytes)}
+      </p>
+      <p className="mt-3 max-w-md text-sm text-slate-500 dark:text-slate-400">
+        Seu Mac está mais leve. Esse espaço foi varrido e liberado das pastas que você escolheu.
+      </p>
+      <div className="mt-6">
+        <PrimaryButton onClick={onAgain}>Nova análise</PrimaryButton>
+      </div>
+    </div>
+  )
 }
 
 function DownloadsBanner({ onAllow }: { onAllow: () => void }) {
@@ -317,7 +552,7 @@ function DownloadsBanner({ onAllow }: { onAllow: () => void }) {
     <div className="mt-5 rounded-2xl border border-amber-400/40 bg-amber-400/10 px-4 py-3 text-sm text-amber-800 dark:text-amber-200">
       <p>
         O macOS bloqueou a pasta Downloads. Autorize o acesso para o app encontrar arquivos
-        .ipa, .apk e .aab. Nada além desses arquivos será apagado.
+        .ipa, .apk, .aab e .dmg. Nada além desses arquivos será apagado.
       </p>
       <button
         className="no-drag mt-3 rounded-full border border-amber-400/50 px-4 py-1.5 text-xs font-semibold"
@@ -368,7 +603,11 @@ function ScanOrb({
 
   return (
     <div className="relative mx-auto flex h-48 w-48 items-center justify-center">
-      <div className="pulse-glow absolute inset-6 rounded-full bg-gradient-to-br from-accent/30 to-accent-2/20 blur-2xl" />
+      <div
+        className={`pulse-glow absolute inset-6 rounded-full bg-gradient-to-br from-accent/30 to-accent-2/20 blur-2xl ${
+          bytes <= 0 && !scanning ? 'opacity-20' : ''
+        }`}
+      />
       <svg
         aria-hidden="true"
         className={scanning ? 'spin-slow' : ''}
@@ -385,7 +624,7 @@ function ScanOrb({
           r="108"
           stroke={`url(#${gradientId})`}
           strokeDasharray="420"
-          strokeDashoffset={scanning ? '120' : '280'}
+          strokeDashoffset={orbDashOffset(bytes, scanning)}
           strokeLinecap="round"
           strokeWidth="10"
           className="transition-[stroke-dashoffset] duration-700"
@@ -411,12 +650,14 @@ function ScanOrb({
 
 function CategoryRow({
   item,
+  previewBytes,
   selected,
   disabled,
   delay,
   onToggle
 }: {
   item: CategoryScan
+  previewBytes: number
   selected: boolean
   disabled: boolean
   delay: number
@@ -432,27 +673,31 @@ function CategoryRow({
     >
       <span
         className={`flex h-5 w-5 items-center justify-center rounded-md border ${
-          item.permissionDenied
-            ? 'border-amber-400 text-amber-400'
-            : selected
-              ? 'border-accent bg-accent text-ink'
+          selected
+            ? 'border-accent bg-accent text-ink'
+            : item.permissionDenied
+              ? 'border-amber-400 text-amber-400'
               : 'border-slate-300 dark:border-line'
         }`}
       >
-        {item.permissionDenied ? '!' : selected ? '✓' : ''}
+        {selected ? '✓' : item.permissionDenied ? '!' : ''}
       </span>
       <span className="flex-1">
         <span className="block font-medium">{item.label}</span>
         <span className="block text-sm text-slate-500">
           {item.permissionDenied
             ? 'Acesso bloqueado pelo macOS'
-            : item.unknownSize
+            : item.unknownSize && item.bytes === 0
               ? 'Tamanho oculto — a limpeza usa o Finder'
               : item.description}
         </span>
       </span>
       <span className="text-sm font-semibold text-accent-2">
-        {item.permissionDenied ? 'Permitir' : item.unknownSize ? 'Lixeira' : formatBytes(item.bytes)}
+        {item.permissionDenied
+          ? 'Permitir'
+          : item.unknownSize && item.bytes === 0
+            ? 'Lixeira'
+            : formatBytes(selected ? previewBytes : item.bytes)}
       </span>
     </button>
   )
