@@ -10,6 +10,7 @@ const cleanMaster = {
   scan: (): Promise<ScanResult> => ipcRenderer.invoke('cleanup:scan'),
   clean: (categoryIds: CategoryId[]): Promise<CleanResult> =>
     ipcRenderer.invoke('cleanup:clean', categoryIds),
+  isPackaged: (): Promise<boolean> => ipcRenderer.invoke('system:isPackaged'),
   openFullDiskAccess: (): Promise<void> => ipcRenderer.invoke('system:openFullDiskAccess'),
   getOpenAtLogin: (): Promise<LoginItemState> => ipcRenderer.invoke('system:getOpenAtLogin'),
   setOpenAtLogin: (enabled: boolean): Promise<LoginItemState> =>

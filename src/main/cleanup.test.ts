@@ -186,4 +186,35 @@ describe('scan e clean', () => {
 
     expect(await readFile(outside, 'utf8')).toBe('nao-apague')
   })
+
+  it('ignora subpasta sem permissão e ainda apaga os artefatos acessíveis', async () => {
+    const home = await makeFakeHome()
+    const locked = path.join(home, 'Downloads', 'locked')
+    await mkdir(locked)
+    await writeFile(path.join(locked, 'blocked.apk'), 'z'.repeat(30))
+    await chmod(locked, 0o555)
+
+    try {
+      const cleaned = await cleanCategories(home, ['developerArtifacts'])
+      expect(cleaned.totalFreedBytes).toBe(430)
+      expect(await readFile(path.join(home, 'Downloads', 'notes.txt'), 'utf8')).toBe('n'.repeat(999))
+      expect(await readFile(path.join(locked, 'blocked.apk'), 'utf8')).toBe('z'.repeat(30))
+    } finally {
+      await chmod(locked, 0o700)
+    }
+  })
+
+  it('falha com PERMISSION_DENIED só se nenhum artefato puder ser apagado', async () => {
+    const home = await mkdtemp(path.join(tmpdir(), 'clean-master-'))
+    const downloads = path.join(home, 'Downloads')
+    await mkdir(downloads)
+    await writeFile(path.join(downloads, 'app.ipa'), 'x'.repeat(16))
+    await chmod(downloads, 0o555)
+
+    try {
+      await expect(cleanCategories(home, ['developerArtifacts'])).rejects.toThrow('PERMISSION_DENIED')
+    } finally {
+      await chmod(downloads, 0o755)
+    }
+  })
 })

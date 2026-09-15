@@ -106,7 +106,11 @@ function registerIpc(): void {
       if (error instanceof CleanupError) {
         throw error
       }
-      console.error('clean failed', { operation: 'clean' })
+      const code =
+        error && typeof error === 'object' && 'code' in error
+          ? String((error as { code?: unknown }).code ?? '')
+          : undefined
+      console.error('clean failed', { operation: 'clean', code })
       throw new CleanupError('Não foi possível limpar os arquivos selecionados.')
     }
   })
@@ -121,6 +125,8 @@ function registerIpc(): void {
       throw new CleanupError('Não foi possível abrir os Ajustes do macOS.')
     }
   })
+
+  ipcMain.handle('system:isPackaged', () => app.isPackaged)
 
   ipcMain.handle('system:getOpenAtLogin', () => getLoginItemState())
 

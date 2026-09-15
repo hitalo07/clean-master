@@ -26,12 +26,30 @@ export class PermissionError extends CleanupError {
   }
 }
 
-export function isFsPermissionError(error: unknown): boolean {
+function getFsCode(error: unknown): string | undefined {
   if (!error || typeof error !== 'object' || !('code' in error)) {
-    return false
+    return undefined
   }
-  const code = (error as { code?: string }).code
+  return (error as { code?: string }).code
+}
+
+export function isFsPermissionError(error: unknown): boolean {
+  const code = getFsCode(error)
   return code === 'EACCES' || code === 'EPERM'
+}
+
+function isSkippableFsError(error: unknown): boolean {
+  const code = getFsCode(error)
+  return (
+    isNotFoundError(error) ||
+    code === 'EBUSY' ||
+    code === 'ENOTEMPTY' ||
+    code === 'EAGAIN' ||
+    code === 'EIO' ||
+    code === 'ENOTSUP' ||
+    code === 'EROFS' ||
+    code === 'ETXTBSY'
+  )
 }
 
 function isNotFoundError(error: unknown): boolean {
@@ -196,7 +214,7 @@ async function collectDeveloperArtifacts(
     try {
       names = await readdir(current)
     } catch (error) {
-      if (isFsPermissionError(error)) {
+      if (isFsPermissionError(error) && path.resolve(current) === path.resolve(downloadsRoot)) {
         throw new PermissionError()
       }
       continue
@@ -235,18 +253,34 @@ async function removeDeveloperArtifacts(homeDir: string, dirPath: string): Promi
   assertAllowedCategoryDir(homeDir, dirPath)
   const files = await collectDeveloperArtifacts(dirPath)
   let freed = 0
+  let denied = 0
 
   for (const file of files) {
-    assertInsideAllowedRoot(dirPath, file.path)
-    if (!isDeveloperArtifactName(path.basename(file.path))) {
-      continue
+    try {
+      assertInsideAllowedRoot(dirPath, file.path)
+      if (!isDeveloperArtifactName(path.basename(file.path))) {
+        continue
+      }
+      const fileStat = await lstat(file.path)
+      if (fileStat.isSymbolicLink() || !fileStat.isFile()) {
+        continue
+      }
+      await unlink(file.path)
+      freed += file.size
+    } catch (error) {
+      if (isFsPermissionError(error)) {
+        denied += 1
+        continue
+      }
+      if (isSkippableFsError(error)) {
+        continue
+      }
+      throw error
     }
-    const fileStat = await lstat(file.path)
-    if (fileStat.isSymbolicLink() || !fileStat.isFile()) {
-      continue
-    }
-    await unlink(file.path)
-    freed += file.size
+  }
+
+  if (freed === 0 && denied > 0) {
+    throw new PermissionError()
   }
 
   return freed
@@ -289,13 +323,20 @@ export async function emptyDirectory(homeDir: string, dirPath: string): Promise<
     })
   )
 
-  if (results.some((result) => result.status === 'rejected' && isFsPermissionError(result.reason))) {
-    throw new PermissionError()
-  }
-
-  const unexpected = results.find((result) => result.status === 'rejected')
+  const permissionDenied = results.some(
+    (result) => result.status === 'rejected' && isFsPermissionError(result.reason)
+  )
+  const unexpected = results.find(
+    (result) =>
+      result.status === 'rejected' &&
+      !isFsPermissionError(result.reason) &&
+      !isSkippableFsError(result.reason)
+  )
   if (unexpected && unexpected.status === 'rejected') {
     throw unexpected.reason
+  }
+  if (permissionDenied && results.every((result) => result.status === 'rejected')) {
+    throw new PermissionError()
   }
 }
 

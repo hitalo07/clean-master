@@ -1,5 +1,6 @@
 import { useEffect, useId, useMemo, useState, type ReactNode } from 'react'
 import { formatBytes } from '../../shared/format'
+import { permissionAppName } from '../../shared/flags'
 import type { CategoryId, CategoryScan, ScanResult } from '../../shared/categories'
 
 type AppStatus = 'idle' | 'scanning' | 'ready' | 'confirm' | 'cleaning' | 'done' | 'error'
@@ -20,6 +21,8 @@ export default function App() {
   const [errorMessage, setErrorMessage] = useState('')
   const [openAtLogin, setOpenAtLogin] = useState(false)
   const [loginNeedsApproval, setLoginNeedsApproval] = useState(false)
+  const [isPackaged, setIsPackaged] = useState(!import.meta.env.DEV)
+  const appName = permissionAppName(isPackaged)
 
   useEffect(() => {
     document.documentElement.classList.toggle('dark', theme === 'dark')
@@ -34,6 +37,9 @@ export default function App() {
       setOpenAtLogin(state.openAtLogin)
       setLoginNeedsApproval(state.requiresApproval)
     })
+    if (window.cleanMaster.isPackaged) {
+      void window.cleanMaster.isPackaged().then(setIsPackaged)
+    }
   }, [])
 
   async function handleOpenAtLogin() {
@@ -84,7 +90,9 @@ export default function App() {
       setStatus('ready')
     } catch (error) {
       if (isPermissionDenied(error)) {
-        setErrorMessage('O macOS bloqueou o acesso. Use o botão abaixo para adicionar o app na lista.')
+        setErrorMessage(
+          `O macOS bloqueou o acesso. Autorize o ${appName} em Ajustes e tente de novo.`
+        )
       } else {
         setErrorMessage('Não foi possível analisar os arquivos.')
       }
@@ -134,13 +142,14 @@ export default function App() {
       setSelected([])
       setStatus('done')
     } catch (error) {
+      setStatus('ready')
       if (isPermissionDenied(error)) {
-        setStatus('ready')
-        setErrorMessage('Autorize o controle do Finder no diálogo do macOS, ou adicione o app na lista com o +.')
+        setErrorMessage(
+          `O macOS bloqueou a exclusão. Dê permissão ao ${appName} em Downloads, no Finder ou no Acesso Total ao Disco e tente de novo.`
+        )
         return
       }
-      setErrorMessage('Não foi possível limpar os arquivos selecionados.')
-      setStatus('error')
+      setErrorMessage('Não foi possível limpar os arquivos selecionados. Feche o Xcode e tente de novo.')
     }
   }
 
@@ -224,7 +233,7 @@ export default function App() {
             ) : null}
 
             {needsDiskAccess && (status === 'ready' || status === 'confirm') ? (
-              <PermissionBanner />
+              <PermissionBanner isPackaged={isPackaged} />
             ) : null}
 
             {scan && (status === 'ready' || status === 'confirm' || status === 'done') ? (
@@ -321,16 +330,19 @@ function DownloadsBanner({ onAllow }: { onAllow: () => void }) {
   )
 }
 
-function PermissionBanner() {
+function PermissionBanner({ isPackaged }: { isPackaged: boolean }) {
+  const appName = permissionAppName(isPackaged)
+
   return (
     <div className="mt-5 rounded-2xl border border-amber-400/40 bg-amber-400/10 px-4 py-3 text-sm text-amber-800 dark:text-amber-200">
       <p>
-        O macOS não coloca o Clean Master sozinho nessa lista. Clique em <strong>+</strong> e
-        escolha o app destacado no Finder. Em desenvolvimento ele se chama <strong>Electron</strong>.
+        O macOS não coloca o {appName} sozinho nessa lista. Clique em <strong>+</strong> e
+        escolha <strong>{appName}</strong> no Finder.
       </p>
       <p className="mt-1 text-xs opacity-80">
-        No diálogo do +, use Command+Shift+G e cole o caminho — ele já foi copiado. Para a
-        Lixeira, aceite o pedido de controlar o Finder se o sistema mostrar.
+        {isPackaged
+          ? 'Para a Lixeira, aceite o pedido de controlar o Finder se o sistema mostrar.'
+          : 'Em desenvolvimento o app aparece como Electron. No diálogo do +, use Command+Shift+G e cole o caminho — ele já foi copiado. Para a Lixeira, aceite o pedido de controlar o Finder se o sistema mostrar.'}
       </p>
       <button
         className="no-drag mt-3 rounded-full border border-amber-400/50 px-4 py-1.5 text-xs font-semibold"

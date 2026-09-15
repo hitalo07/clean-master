@@ -8,7 +8,9 @@ mac:
   icon: build/icon.icns
   category: public.app-category.utilities
   target:
-    - dmg
+    - target: dmg
+      arch:
+        - universal
   identity: "Apple Development: Hitalo Cunha de Sousa (H2XKQKNL2Y)"
   extendInfo:
     NSAppleEventsUsageDescription: O Clean Master usa o Finder para esvaziar a Lixeira.
@@ -17,4 +19,4 @@ extraResources:
   - from: build/tray.png
     to: tray.png
 dmg:
-  artifactName: ${productName}-${version}.${ext}
+  artifactName: ${productName}-${version}-mac.${ext}

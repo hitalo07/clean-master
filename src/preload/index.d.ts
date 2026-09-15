@@ -6,6 +6,7 @@ export interface LoginItemState {
 }
 
 export interface CleanMasterAPI {
+  isPackaged: () => Promise<boolean>
   scan: () => Promise<ScanResult>
   clean: (categoryIds: CategoryId[]) => Promise<CleanResult>
   openFullDiskAccess: () => Promise<void>

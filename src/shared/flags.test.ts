@@ -1,5 +1,12 @@
 import { describe, expect, it } from 'vitest'
-import { parseEnabledFlag } from './flags'
+import { parseEnabledFlag, permissionAppName } from './flags'
+
+describe('permissionAppName', () => {
+  it('usa Electron só em desenvolvimento', () => {
+    expect(permissionAppName(false)).toBe('Electron')
+    expect(permissionAppName(true)).toBe('Clean Master')
+  })
+})
 
 describe('parseEnabledFlag', () => {
   it('aceita boolean', () => {
