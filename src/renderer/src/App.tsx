@@ -18,11 +18,32 @@ export default function App() {
   const [selected, setSelected] = useState<CategoryId[]>([])
   const [freedBytes, setFreedBytes] = useState(0)
   const [errorMessage, setErrorMessage] = useState('')
+  const [openAtLogin, setOpenAtLogin] = useState(false)
+  const [loginNeedsApproval, setLoginNeedsApproval] = useState(false)
 
   useEffect(() => {
     document.documentElement.classList.toggle('dark', theme === 'dark')
     localStorage.setItem(THEME_KEY, theme)
   }, [theme])
+
+  useEffect(() => {
+    if (!window.cleanMaster?.getOpenAtLogin) {
+      return
+    }
+    void window.cleanMaster.getOpenAtLogin().then((state) => {
+      setOpenAtLogin(state.openAtLogin)
+      setLoginNeedsApproval(state.requiresApproval)
+    })
+  }, [])
+
+  async function handleOpenAtLogin() {
+    if (!window.cleanMaster?.setOpenAtLogin) {
+      return
+    }
+    const state = await window.cleanMaster.setOpenAtLogin(!openAtLogin)
+    setOpenAtLogin(state.openAtLogin)
+    setLoginNeedsApproval(state.requiresApproval)
+  }
 
   const selectedBytes = useMemo(() => {
     if (!scan) {
@@ -34,15 +55,17 @@ export default function App() {
   }, [scan, selected])
 
   const needsDiskAccess =
-    scan?.categories.some((item) => item.permissionDenied || item.unknownSize) ?? false
+    scan?.categories.some(
+      (item) => item.id !== 'developerArtifacts' && (item.permissionDenied || item.unknownSize)
+    ) ?? false
+  const needsDownloadsAccess =
+    scan?.categories.some((item) => item.id === 'developerArtifacts' && item.permissionDenied) ??
+    false
 
-  const canClean =
-    selectedBytes > 0 ||
-    Boolean(
-      scan?.categories.some(
-        (item) => selected.includes(item.id) && item.unknownSize && !item.permissionDenied
-      )
-    )
+  const canClean = selected.some((id) => {
+    const item = scan?.categories.find((category) => category.id === id)
+    return Boolean(item && !item.permissionDenied)
+  })
 
   async function handleScan() {
     if (!window.cleanMaster) {
@@ -51,15 +74,13 @@ export default function App() {
       return
     }
     setStatus('scanning')
+    setScan(null)
+    setFreedBytes(0)
     setErrorMessage('')
     try {
       const result = await window.cleanMaster.scan()
       setScan(result)
-      setSelected(
-        result.categories
-          .filter((item) => (item.bytes > 0 || item.unknownSize) && !item.permissionDenied)
-          .map((item) => item.id)
-      )
+      setSelected(result.categories.filter((item) => !item.permissionDenied).map((item) => item.id))
       setStatus('ready')
     } catch (error) {
       if (isPermissionDenied(error)) {
@@ -68,6 +89,24 @@ export default function App() {
         setErrorMessage('Não foi possível analisar os arquivos.')
       }
       setStatus('error')
+    }
+  }
+
+  async function handleDownloadsAccess() {
+    if (!window.cleanMaster?.requestDownloadsAccess) {
+      return
+    }
+    try {
+      const result = await window.cleanMaster.requestDownloadsAccess()
+      if (result.granted) {
+        await handleScan()
+      }
+    } catch (error) {
+      setErrorMessage(
+        error instanceof Error && error.message.includes('Selecione a pasta Downloads')
+          ? 'Selecione a pasta Downloads para autorizar o acesso.'
+          : 'Não foi possível autorizar a pasta Downloads.'
+      )
     }
   }
 
@@ -108,6 +147,10 @@ export default function App() {
   function toggleCategory(id: CategoryId) {
     const blocked = scan?.categories.find((item) => item.id === id)?.permissionDenied
     if (blocked) {
+      if (id === 'developerArtifacts') {
+        void handleDownloadsAccess()
+        return
+      }
       void window.cleanMaster?.openFullDiskAccess()
       return
     }
@@ -121,7 +164,7 @@ export default function App() {
       <aside className="titlebar flex w-[232px] shrink-0 flex-col border-r border-slate-200 bg-white/80 px-5 pb-5 pt-12 dark:border-line dark:bg-ink-soft/90">
         <div className="mb-10 flex items-center gap-3">
           <div className="flex h-10 w-10 items-center justify-center rounded-2xl bg-gradient-to-br from-accent to-accent-2 text-ink shadow-[0_8px_24px_rgba(61,220,151,0.28)]">
-            <SparkleIcon />
+            <BroomIcon />
           </div>
           <div>
             <p className="text-[11px] font-medium uppercase tracking-[0.22em] text-slate-400">Mac</p>
@@ -133,14 +176,33 @@ export default function App() {
           <NavItem active label="Smart Scan" />
         </nav>
 
-        <button
-          className="no-drag mt-auto flex items-center justify-between rounded-2xl border border-slate-200 bg-slate-50 px-3 py-2 text-sm dark:border-line dark:bg-panel"
-          onClick={() => setTheme(theme === 'dark' ? 'light' : 'dark')}
-          type="button"
-        >
-          Tema {theme === 'dark' ? 'escuro' : 'claro'}
-          <span className="text-xs text-slate-400">{theme === 'dark' ? '☾' : '☀'}</span>
-        </button>
+        <div className="no-drag mt-auto flex flex-col gap-2">
+          <button
+            className="flex items-center justify-between rounded-2xl border border-slate-200 bg-slate-50 px-3 py-2 text-sm dark:border-line dark:bg-panel"
+            onClick={() => void handleOpenAtLogin()}
+            type="button"
+          >
+            Abrir ao iniciar
+            <span className="text-xs text-slate-400">{openAtLogin ? 'ligado' : 'desligado'}</span>
+          </button>
+          {loginNeedsApproval ? (
+            <button
+              className="text-left text-xs text-amber-600 dark:text-amber-300"
+              onClick={() => void window.cleanMaster?.openLoginItemsSettings()}
+              type="button"
+            >
+              Autorizar em Ajustes → Itens de Início
+            </button>
+          ) : null}
+          <button
+            className="flex items-center justify-between rounded-2xl border border-slate-200 bg-slate-50 px-3 py-2 text-sm dark:border-line dark:bg-panel"
+            onClick={() => setTheme(theme === 'dark' ? 'light' : 'dark')}
+            type="button"
+          >
+            Tema {theme === 'dark' ? 'escuro' : 'claro'}
+            <span className="text-xs text-slate-400">{theme === 'dark' ? '☾' : '☀'}</span>
+          </button>
+        </div>
       </aside>
 
       <main className="relative flex min-w-0 flex-1 flex-col overflow-hidden">
@@ -157,6 +219,10 @@ export default function App() {
               {copyForStatus(status, selectedBytes)}
             </p>
 
+            {needsDownloadsAccess && (status === 'ready' || status === 'confirm') ? (
+              <DownloadsBanner onAllow={() => void handleDownloadsAccess()} />
+            ) : null}
+
             {needsDiskAccess && (status === 'ready' || status === 'confirm') ? (
               <PermissionBanner />
             ) : null}
@@ -168,10 +234,7 @@ export default function App() {
                     key={item.id}
                     item={item}
                     selected={selected.includes(item.id)}
-                    disabled={
-                      (status !== 'ready' && status !== 'confirm') ||
-                      (item.bytes === 0 && !item.permissionDenied && !item.unknownSize)
-                    }
+                    disabled={status !== 'ready' && status !== 'confirm'}
                     delay={index * 60}
                     onToggle={() => toggleCategory(item.id)}
                   />
@@ -223,13 +286,13 @@ function isPermissionDenied(error: unknown): boolean {
 
 function copyForStatus(status: AppStatus, selectedBytes: number): string {
   if (status === 'scanning') {
-    return 'Varrendo lixo do Xcode e a Lixeira…'
+    return 'Varrendo lixo do Xcode, a Lixeira e artefatos em Downloads…'
   }
   if (status === 'cleaning') {
     return 'Removendo os arquivos selecionados…'
   }
   if (status === 'confirm') {
-    return `Isso apaga ${formatBytes(selectedBytes)} das pastas selecionadas, inclusive a Lixeira se ela estiver marcada. O Xcode recria o que precisar.`
+    return `Isso apaga ${formatBytes(selectedBytes)} das pastas selecionadas. Artefatos de desenvolvedor remove só .ipa, .apk e .aab em Downloads.`
   }
   if (status === 'done') {
     return 'Limpeza concluída. O Xcode volta a gerar esses arquivos quando você abrir um projeto.'
@@ -237,7 +300,25 @@ function copyForStatus(status: AppStatus, selectedBytes: number): string {
   if (status === 'ready') {
     return 'Selecione o que deseja remover. Nada fora das pastas permitidas é alterado.'
   }
-  return 'Encontre lixo do Xcode e esvazie a Lixeira sem sair das pastas oficiais do macOS.'
+  return 'Encontre lixo do Xcode, esvazie a Lixeira e remova .ipa, .apk e .aab de Downloads.'
+}
+
+function DownloadsBanner({ onAllow }: { onAllow: () => void }) {
+  return (
+    <div className="mt-5 rounded-2xl border border-amber-400/40 bg-amber-400/10 px-4 py-3 text-sm text-amber-800 dark:text-amber-200">
+      <p>
+        O macOS bloqueou a pasta Downloads. Autorize o acesso para o app encontrar arquivos
+        .ipa, .apk e .aab. Nada além desses arquivos será apagado.
+      </p>
+      <button
+        className="no-drag mt-3 rounded-full border border-amber-400/50 px-4 py-1.5 text-xs font-semibold"
+        onClick={onAllow}
+        type="button"
+      >
+        Permitir pasta Downloads
+      </button>
+    </div>
+  )
 }
 
 function PermissionBanner() {
@@ -308,7 +389,9 @@ function ScanOrb({
         <p className="text-xs font-medium uppercase tracking-[0.2em] text-slate-400">
           {status === 'done' ? 'liberado' : 'encontrado'}
         </p>
-        <p className="mt-1 text-3xl font-semibold tracking-tight text-slate-900 dark:text-white">{formatBytes(bytes)}</p>
+        <p className="mt-1 text-3xl font-semibold tracking-tight text-slate-900 dark:text-white">
+          {scanning ? '…' : formatBytes(bytes)}
+        </p>
       </div>
     </div>
   )
@@ -330,7 +413,7 @@ function CategoryRow({
   return (
     <button
       className="rise-in flex w-full items-center gap-4 rounded-2xl border border-slate-200 bg-slate-50 px-4 py-4 text-left transition hover:border-accent/50 dark:border-line dark:bg-ink-soft"
-      disabled={disabled || item.bytes === 0}
+      disabled={disabled}
       onClick={onToggle}
       style={{ animationDelay: `${delay}ms` }}
       type="button"
@@ -410,12 +493,16 @@ function GhostButton({ children, onClick }: { children: ReactNode; onClick: () =
   )
 }
 
-function SparkleIcon() {
+function BroomIcon() {
   return (
     <svg aria-hidden="true" fill="none" height="18" viewBox="0 0 24 24" width="18">
       <title>Clean Master</title>
       <path
-        d="M12 3l1.2 6.3L19 12l-5.8 2.7L12 21l-1.2-6.3L5 12l5.8-2.7L12 3z"
+        d="M15.2 3.2c.4-.4 1-.4 1.4 0l4.2 4.2c.4.4.4 1 0 1.4L19.6 10 14 4.4l1.2-1.2Z"
+        fill="currentColor"
+      />
+      <path
+        d="M13.4 6.2 6.4 13.2c-.9.9-1.1 2.3-.6 3.5l-2.6 2.6 1.5 1.5 2.6-2.6c1.2.5 2.6.3 3.5-.6l7-7-4.4-4.4Z"
         fill="currentColor"
       />
     </svg>

@@ -2,6 +2,7 @@ import { chmod, mkdir, mkdtemp, readFile, symlink, writeFile } from 'node:fs/pro
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import { describe, expect, it } from 'vitest'
+import { isDeveloperArtifactName } from '../shared/categories'
 import {
   assertInsideAllowedRoot,
   cleanCategories,
@@ -23,8 +24,25 @@ async function makeFakeHome(): Promise<string> {
   await writeFile(path.join(xcode, 'Archives', '2026-01-01', 'app.xcarchive'), 'b'.repeat(1024))
   await writeFile(path.join(xcode, 'iOS DeviceSupport', 'iPhone', 'symbols'), 'c'.repeat(512))
   await writeFile(path.join(home, '.Trash', 'old.zip'), 'd'.repeat(256))
+  await mkdir(path.join(home, 'Downloads', 'builds'), { recursive: true })
+  await writeFile(path.join(home, 'Downloads', 'app.ipa'), 'i'.repeat(100))
+  await writeFile(path.join(home, 'Downloads', 'game.APK'), 'k'.repeat(200))
+  await writeFile(path.join(home, 'Downloads', 'store.aab'), 'b'.repeat(50))
+  await writeFile(path.join(home, 'Downloads', 'notes.txt'), 'n'.repeat(999))
+  await writeFile(path.join(home, 'Downloads', 'builds', 'nested.ipa'), 'p'.repeat(80))
   return home
 }
+
+describe('isDeveloperArtifactName', () => {
+  it('aceita só .ipa, .apk e .aab', () => {
+    expect(isDeveloperArtifactName('app.ipa')).toBe(true)
+    expect(isDeveloperArtifactName('game.APK')).toBe(true)
+    expect(isDeveloperArtifactName('store.aab')).toBe(true)
+    expect(isDeveloperArtifactName('notes.txt')).toBe(false)
+    expect(isDeveloperArtifactName('.ipa')).toBe(false)
+    expect(isDeveloperArtifactName('app.ipa.bak')).toBe(false)
+  })
+})
 
 describe('parseCategoryIds', () => {
   it('aceita apenas IDs da lista branca', () => {
@@ -46,6 +64,9 @@ describe('resolveCategoryDir', () => {
       path.resolve('/Users/demo/Library/Developer/Xcode/DerivedData')
     )
     expect(resolveCategoryDir('/Users/demo', 'trash')).toBe(path.resolve('/Users/demo/.Trash'))
+    expect(resolveCategoryDir('/Users/demo', 'developerArtifacts')).toBe(
+      path.resolve('/Users/demo/Downloads')
+    )
   })
 
   it('bloqueia caminho fora da área permitida', () => {
@@ -71,13 +92,34 @@ describe('scan e clean', () => {
     const home = await makeFakeHome()
     const result = await scanCategories(home)
 
-    expect(result.totalBytes).toBe(2048 + 1024 + 512 + 256)
+    expect(result.totalBytes).toBe(2048 + 1024 + 512 + 256 + 430)
     expect(result.categories.map((item) => item.id)).toEqual([
       'derivedData',
       'archives',
       'iosDeviceSupport',
-      'trash'
+      'trash',
+      'developerArtifacts'
     ])
+    expect(result.categories.find((item) => item.id === 'developerArtifacts')?.bytes).toBe(430)
+  })
+
+  it('remove só .ipa, .apk e .aab e deixa o resto de Downloads', async () => {
+    const home = await makeFakeHome()
+    const cleaned = await cleanCategories(home, ['developerArtifacts'])
+    const after = await scanCategories(home)
+
+    expect(cleaned.totalFreedBytes).toBe(430)
+    expect(after.categories.find((item) => item.id === 'developerArtifacts')?.bytes).toBe(0)
+    expect(await readFile(path.join(home, 'Downloads', 'notes.txt'), 'utf8')).toBe('n'.repeat(999))
+    expect(after.categories.find((item) => item.id === 'derivedData')?.bytes).toBe(2048)
+  })
+
+  it('recusa esvaziar Downloads por completo', async () => {
+    const home = await makeFakeHome()
+    await expect(emptyDirectory(home, path.join(home, 'Downloads'))).rejects.toThrow(
+      'Downloads não pode ser esvaziada'
+    )
+    expect(await readFile(path.join(home, 'Downloads', 'notes.txt'), 'utf8')).toBe('n'.repeat(999))
   })
 
   it('esvazia só a categoria pedida', async () => {
@@ -89,6 +131,24 @@ describe('scan e clean', () => {
     expect(after.categories.find((item) => item.id === 'derivedData')?.bytes).toBe(0)
     expect(after.categories.find((item) => item.id === 'archives')?.bytes).toBe(1024)
     expect(after.categories.find((item) => item.id === 'trash')?.bytes).toBe(256)
+  })
+
+  it('volta a contar arquivos criados depois da limpeza', async () => {
+    const home = await makeFakeHome()
+    await cleanCategories(home, ['derivedData', 'trash'])
+
+    await mkdir(path.join(home, 'Library', 'Developer', 'Xcode', 'DerivedData', 'NewApp'), {
+      recursive: true
+    })
+    await writeFile(
+      path.join(home, 'Library', 'Developer', 'Xcode', 'DerivedData', 'NewApp', 'cache.bin'),
+      'e'.repeat(4096)
+    )
+    await writeFile(path.join(home, '.Trash', 'novo.zip'), 'f'.repeat(128))
+
+    const result = await scanCategories(home)
+    expect(result.categories.find((item) => item.id === 'derivedData')?.bytes).toBe(4096)
+    expect(result.categories.find((item) => item.id === 'trash')?.bytes).toBe(128)
   })
 
   it('esvazia a Lixeira sem apagar a pasta .Trash', async () => {

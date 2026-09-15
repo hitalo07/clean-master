@@ -1,4 +1,3 @@
-import type { Dirent } from 'node:fs'
 import { homedir } from 'node:os'
 import { lstat, readdir, rm, unlink } from 'node:fs/promises'
 import path from 'node:path'
@@ -8,7 +7,8 @@ import {
   type CategoryId,
   type CategoryScan,
   type CleanResult,
-  type ScanResult
+  type ScanResult,
+  isDeveloperArtifactName
 } from '../shared/categories'
 import { emptyTrashViaFinder, isAutomationDenied } from './finder-trash'
 
@@ -111,7 +111,11 @@ function assertAllowedCategoryDir(homeDir: string, dirPath: string): void {
 export async function inspectDirectory(dirPath: string): Promise<'missing' | 'ok' | 'denied'> {
   try {
     const stat = await lstat(dirPath)
-    if (stat.isSymbolicLink() || !stat.isDirectory()) {
+    if (stat.isSymbolicLink()) {
+      await readdir(dirPath)
+      return 'ok'
+    }
+    if (!stat.isDirectory()) {
       return 'missing'
     }
     await readdir(dirPath)
@@ -127,7 +131,7 @@ export async function inspectDirectory(dirPath: string): Promise<'missing' | 'ok
   }
 }
 
-// Soma o tamanho dos arquivos sem seguir symlink
+// Soma o tamanho dos arquivos usando lstat — o tipo do readdir no macOS pode vir vazio
 export async function getDirectorySize(dirPath: string): Promise<number> {
   const status = await inspectDirectory(dirPath)
   if (status !== 'ok') {
@@ -143,9 +147,9 @@ export async function getDirectorySize(dirPath: string): Promise<number> {
       break
     }
 
-    let entries: Dirent[]
+    let names: string[]
     try {
-      entries = await readdir(current, { withFileTypes: true })
+      names = await readdir(current)
     } catch (error) {
       if (isFsPermissionError(error)) {
         throw new PermissionError()
@@ -153,22 +157,22 @@ export async function getDirectorySize(dirPath: string): Promise<number> {
       continue
     }
 
-    for (const entry of entries) {
-      const fullPath = path.join(current, entry.name)
-      if (entry.isSymbolicLink()) {
-        continue
-      }
-      if (entry.isDirectory()) {
-        stack.push(fullPath)
-        continue
-      }
-      if (entry.isFile()) {
-        try {
-          const fileStat = await lstat(fullPath)
-          total += fileStat.size
-        } catch {
+    for (const name of names) {
+      const fullPath = path.join(current, name)
+      try {
+        const fileStat = await lstat(fullPath)
+        if (fileStat.isSymbolicLink()) {
           continue
         }
+        if (fileStat.isDirectory()) {
+          stack.push(fullPath)
+          continue
+        }
+        if (fileStat.isFile()) {
+          total += fileStat.size
+        }
+      } catch {
+        continue
       }
     }
   }
@@ -176,9 +180,84 @@ export async function getDirectorySize(dirPath: string): Promise<number> {
   return total
 }
 
+async function collectDeveloperArtifacts(
+  downloadsRoot: string
+): Promise<Array<{ path: string; size: number }>> {
+  const found: Array<{ path: string; size: number }> = []
+  const stack = [downloadsRoot]
+
+  while (stack.length > 0) {
+    const current = stack.pop()
+    if (!current) {
+      break
+    }
+
+    let names: string[]
+    try {
+      names = await readdir(current)
+    } catch (error) {
+      if (isFsPermissionError(error)) {
+        throw new PermissionError()
+      }
+      continue
+    }
+
+    for (const name of names) {
+      const fullPath = path.join(current, name)
+      try {
+        const fileStat = await lstat(fullPath)
+        if (fileStat.isSymbolicLink()) {
+          continue
+        }
+        if (fileStat.isDirectory()) {
+          stack.push(fullPath)
+          continue
+        }
+        if (fileStat.isFile() && isDeveloperArtifactName(name)) {
+          assertInsideAllowedRoot(downloadsRoot, fullPath)
+          found.push({ path: fullPath, size: fileStat.size })
+        }
+      } catch {
+        continue
+      }
+    }
+  }
+
+  return found
+}
+
+async function getDeveloperArtifactsSize(dirPath: string): Promise<number> {
+  const files = await collectDeveloperArtifacts(dirPath)
+  return files.reduce((sum, file) => sum + file.size, 0)
+}
+
+async function removeDeveloperArtifacts(homeDir: string, dirPath: string): Promise<number> {
+  assertAllowedCategoryDir(homeDir, dirPath)
+  const files = await collectDeveloperArtifacts(dirPath)
+  let freed = 0
+
+  for (const file of files) {
+    assertInsideAllowedRoot(dirPath, file.path)
+    if (!isDeveloperArtifactName(path.basename(file.path))) {
+      continue
+    }
+    const fileStat = await lstat(file.path)
+    if (fileStat.isSymbolicLink() || !fileStat.isFile()) {
+      continue
+    }
+    await unlink(file.path)
+    freed += file.size
+  }
+
+  return freed
+}
+
 // Esvazia a pasta da categoria sem sair da lista branca
 export async function emptyDirectory(homeDir: string, dirPath: string): Promise<void> {
   assertAllowedCategoryDir(homeDir, dirPath)
+  if (path.resolve(dirPath) === resolveCategoryDir(homeDir, 'developerArtifacts')) {
+    throw new CleanupError('Downloads não pode ser esvaziada')
+  }
 
   const status = await inspectDirectory(dirPath)
   if (status === 'missing') {
@@ -188,9 +267,9 @@ export async function emptyDirectory(homeDir: string, dirPath: string): Promise<
     throw new PermissionError()
   }
 
-  let entries: Dirent[]
+  let names: string[]
   try {
-    entries = await readdir(dirPath, { withFileTypes: true })
+    names = await readdir(dirPath)
   } catch (error) {
     if (isFsPermissionError(error)) {
       throw new PermissionError()
@@ -199,9 +278,10 @@ export async function emptyDirectory(homeDir: string, dirPath: string): Promise<
   }
 
   const results = await Promise.allSettled(
-    entries.map(async (entry) => {
-      const fullPath = path.join(dirPath, entry.name)
-      if (entry.isSymbolicLink()) {
+    names.map(async (name) => {
+      const fullPath = path.join(dirPath, name)
+      const entryStat = await lstat(fullPath)
+      if (entryStat.isSymbolicLink()) {
         await unlink(fullPath)
         return
       }
@@ -233,7 +313,10 @@ export async function scanCategories(homeDir: string): Promise<ScanResult> {
 
     if (status === 'ok') {
       try {
-        bytes = await getDirectorySize(dirPath)
+        bytes =
+          id === 'developerArtifacts'
+            ? await getDeveloperArtifactsSize(dirPath)
+            : await getDirectorySize(dirPath)
       } catch (error) {
         if (error instanceof PermissionError && id === 'trash') {
           unknownSize = true
@@ -282,6 +365,12 @@ export async function cleanCategories(
 
     if (status === 'denied') {
       throw new PermissionError()
+    }
+
+    if (id === 'developerArtifacts') {
+      const freedBytes = status === 'ok' ? await removeDeveloperArtifacts(homeDir, dirPath) : 0
+      categories.push({ id, freedBytes })
+      continue
     }
 
     const freedBytes = status === 'ok' ? await getDirectorySize(dirPath) : 0
