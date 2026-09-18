@@ -16,7 +16,8 @@ const PROTECTED_RELATIVE_PATHS = [
   '.Trash',
   'Library/Developer/Xcode/DerivedData',
   'Library/Developer/Xcode/Archives',
-  'Library/Developer/Xcode/iOS DeviceSupport'
+  'Library/Developer/Xcode/iOS DeviceSupport',
+  'Library/Developer/CoreSimulator'
 ]
 
 export async function needsDownloadsPrompt(homeDir: string): Promise<boolean> {

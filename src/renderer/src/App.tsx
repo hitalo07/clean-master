@@ -436,7 +436,7 @@ function userFacingCleanError(error: unknown): string | null {
 
 function copyForStatus(status: AppStatus, selectedBytes: number): string {
   if (status === 'scanning') {
-    return 'Pedindo permissões e em seguida analisando Xcode, Lixeira e Downloads…'
+    return 'Pedindo permissões e em seguida analisando Xcode, Simulator, Lixeira e Downloads…'
   }
   if (status === 'cleaning') {
     return 'Removendo os arquivos selecionados…'

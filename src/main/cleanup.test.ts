@@ -24,6 +24,13 @@ async function makeFakeHome(): Promise<string> {
   await writeFile(path.join(xcode, 'DerivedData', 'MyApp', 'cache.bin'), 'a'.repeat(2048))
   await writeFile(path.join(xcode, 'Archives', '2026-01-01', 'app.xcarchive'), 'b'.repeat(1024))
   await writeFile(path.join(xcode, 'iOS DeviceSupport', 'iPhone', 'symbols'), 'c'.repeat(512))
+  await mkdir(path.join(home, 'Library', 'Developer', 'CoreSimulator', 'Devices'), {
+    recursive: true
+  })
+  await writeFile(
+    path.join(home, 'Library', 'Developer', 'CoreSimulator', 'Devices', 'data.bin'),
+    's'.repeat(128)
+  )
   await writeFile(path.join(home, '.Trash', 'old.zip'), 'd'.repeat(256))
   await mkdir(path.join(home, 'Downloads', 'builds'), { recursive: true })
   await writeFile(path.join(home, 'Downloads', 'app.ipa'), 'i'.repeat(100))
@@ -85,6 +92,9 @@ describe('resolveCategoryDir', () => {
       path.resolve('/Users/demo/Library/Developer/Xcode/DerivedData')
     )
     expect(resolveCategoryDir('/Users/demo', 'trash')).toBe(path.resolve('/Users/demo/.Trash'))
+    expect(resolveCategoryDir('/Users/demo', 'simulatorRuntime')).toBe(
+      path.resolve('/Users/demo/Library/Developer/CoreSimulator')
+    )
     expect(resolveCategoryDir('/Users/demo', 'downloads')).toBe(
       path.resolve('/Users/demo/Downloads')
     )
@@ -113,14 +123,16 @@ describe('scan e clean', () => {
     const home = await makeFakeHome()
     const result = await scanCategories(home)
 
-    expect(result.totalBytes).toBe(2048 + 1024 + 512 + 256 + 494)
+    expect(result.totalBytes).toBe(2048 + 1024 + 512 + 128 + 256 + 494)
     expect(result.categories.map((item) => item.id)).toEqual([
       'derivedData',
       'archives',
       'iosDeviceSupport',
+      'simulatorRuntime',
       'trash',
       'downloads'
     ])
+    expect(result.categories.find((item) => item.id === 'simulatorRuntime')?.bytes).toBe(128)
     expect(result.categories.find((item) => item.id === 'downloads')?.bytes).toBe(494)
     expect(result.categories.find((item) => item.id === 'downloads')?.artifactBytes).toBe(430)
     expect(result.categories.find((item) => item.id === 'downloads')?.kindBytes).toEqual({
@@ -190,6 +202,17 @@ describe('scan e clean', () => {
     expect(after.categories.find((item) => item.id === 'derivedData')?.bytes).toBe(0)
     expect(after.categories.find((item) => item.id === 'archives')?.bytes).toBe(1024)
     expect(after.categories.find((item) => item.id === 'trash')?.bytes).toBe(256)
+    expect(after.categories.find((item) => item.id === 'simulatorRuntime')?.bytes).toBe(128)
+  })
+
+  it('esvazia o Simulator Runtime sem mexer no Derived Data', async () => {
+    const home = await makeFakeHome()
+    const cleaned = await cleanCategories(home, ['simulatorRuntime'])
+    const after = await scanCategories(home)
+
+    expect(cleaned.totalFreedBytes).toBe(128)
+    expect(after.categories.find((item) => item.id === 'simulatorRuntime')?.bytes).toBe(0)
+    expect(after.categories.find((item) => item.id === 'derivedData')?.bytes).toBe(2048)
   })
 
   it('volta a contar arquivos criados depois da limpeza', async () => {

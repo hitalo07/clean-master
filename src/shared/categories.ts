@@ -2,6 +2,7 @@ export const CATEGORY_IDS = [
   'derivedData',
   'archives',
   'iosDeviceSupport',
+  'simulatorRuntime',
   'trash',
   'downloads'
 ] as const
@@ -26,6 +27,11 @@ export const CATEGORY_META: Record<
     label: 'iOS Device Support',
     description: 'Símbolos de dispositivos iOS já conectados',
     relativePath: 'Library/Developer/Xcode/iOS DeviceSupport'
+  },
+  simulatorRuntime: {
+    label: 'Simulator Runtime',
+    description: 'Runtimes e dados do iPhone Simulator — não é Derived Data',
+    relativePath: 'Library/Developer/CoreSimulator'
   },
   trash: {
     label: 'Lixeira',

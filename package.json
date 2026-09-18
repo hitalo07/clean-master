@@ -1,6 +1,6 @@
 {
 	"name": "clean-master-app",
-	"version": "0.2.0",
+	"version": "0.3.0",
 	"productName": "Clean Master",
 	"description": "Limpador de lixo do Xcode para macOS",
 	"main": "./out/main/index.js",
